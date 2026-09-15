@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/auth/get-session";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 import { inviteClientSchema } from "@/lib/validations/agency";
@@ -91,4 +92,65 @@ function traduzErroCriacao(message: string): string {
     return "Já existe uma conta com esse e-mail.";
   }
   return `Não foi possível criar a conta: ${message}`;
+}
+
+export type CreateStaffState =
+  | { error: string; success?: undefined }
+  | { error?: undefined; success: true; email: string; tempPassword: string }
+  | null;
+
+/**
+ * Cria um novo membro do staff da agência (platform_admin) — mesmo padrão
+ * de senha temporária usado para clientes, pelo mesmo motivo (link de
+ * e-mail se mostrou pouco confiável neste ambiente).
+ */
+export async function createStaffAction(
+  _prevState: CreateStaffState,
+  formData: FormData
+): Promise<CreateStaffState> {
+  const session = await getSession();
+  if (!session?.isPlatformAdmin) {
+    return { error: "Apenas administradores da agência podem adicionar staff." };
+  }
+
+  const name = String(formData.get("name") ?? "").trim();
+  const email = String(formData.get("email") ?? "").trim();
+  if (name.length < 2) return { error: "Informe o nome." };
+  if (!email.includes("@")) return { error: "Informe um e-mail válido." };
+
+  const admin = createServiceRoleClient();
+  const tempPassword = generateTempPassword();
+
+  const { data: created, error: createError } = await admin.auth.admin.createUser({
+    email,
+    password: tempPassword,
+    email_confirm: true,
+    user_metadata: { name },
+  });
+
+  if (createError || !created.user) {
+    return { error: traduzErroCriacao(createError?.message ?? "erro desconhecido") };
+  }
+
+  const { error: insertError } = await admin
+    .from("platform_admins")
+    .insert({ user_id: created.user.id });
+
+  if (insertError) {
+    return {
+      error: `Conta criada, mas falhou ao marcar como staff: ${insertError.message}. Delete o usuário "${email}" em Authentication → Users e tente de novo.`,
+    };
+  }
+
+  return { success: true, email, tempPassword };
+}
+
+export async function removeStaffAction(userId: string) {
+  const session = await getSession();
+  if (!session?.isPlatformAdmin) return;
+  if (userId === session.userId) return; // não remove a si mesmo
+
+  const admin = createServiceRoleClient();
+  await admin.from("platform_admins").delete().eq("user_id", userId);
+  revalidatePath("/agency-dashboard/usuarios");
 }

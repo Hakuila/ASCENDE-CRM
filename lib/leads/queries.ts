@@ -98,6 +98,7 @@ export async function getLeadById(organizationId: string, leadId: string) {
     .from("leads")
     .select(
       `id, name, email, phone, whatsapp, source, medium, campaign, value, notes,
+       company_id, campaign_id,
        created_at, updated_at,
        stage:pipeline_stages(id, name, kind),
        owner:profiles(id, name)`

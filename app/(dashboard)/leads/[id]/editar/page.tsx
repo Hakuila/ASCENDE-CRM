@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/get-session";
 import { getLeadById, getOrgMembers, getDefaultPipelineStages } from "@/lib/leads/queries";
+import { getCompaniesForSelect } from "@/lib/companies/queries";
+import { getCampaignsForSelect } from "@/lib/campaigns/queries";
 import { updateLeadAction } from "@/lib/leads/actions";
 import { LeadForm } from "@/components/leads/lead-form";
 
@@ -11,10 +13,12 @@ export default async function EditarLeadPage({ params }: { params: { id: string 
 
   const organizationId = session.organization.id;
 
-  const [lead, members, { stages }] = await Promise.all([
+  const [lead, members, { stages }, companies, campaigns] = await Promise.all([
     getLeadById(organizationId, params.id),
     getOrgMembers(organizationId),
     getDefaultPipelineStages(organizationId),
+    getCompaniesForSelect(organizationId),
+    getCampaignsForSelect(organizationId),
   ]);
 
   if (!lead) notFound();
@@ -34,6 +38,8 @@ export default async function EditarLeadPage({ params }: { params: { id: string 
           action={boundAction}
           members={members}
           stages={stages}
+          companies={companies}
+          campaigns={campaigns}
           defaults={{
             name: lead.name,
             email: lead.email,
@@ -46,6 +52,8 @@ export default async function EditarLeadPage({ params }: { params: { id: string 
             notes: lead.notes,
             ownerId: lead.owner?.id,
             stageId: lead.stage?.id,
+            companyId: (lead as any).company_id,
+            campaignId: (lead as any).campaign_id,
           }}
           submitLabel="Salvar alterações"
         />

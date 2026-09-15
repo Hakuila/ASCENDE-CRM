@@ -2,6 +2,8 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/get-session";
 import { getOrgMembers, getDefaultPipelineStages } from "@/lib/leads/queries";
+import { getCompaniesForSelect } from "@/lib/companies/queries";
+import { getCampaignsForSelect } from "@/lib/campaigns/queries";
 import { createLeadAction } from "@/lib/leads/actions";
 import { LeadForm } from "@/components/leads/lead-form";
 
@@ -10,9 +12,11 @@ export default async function NovoLeadPage() {
   if (!session?.organization) redirect("/login");
 
   const organizationId = session.organization.id;
-  const [members, { stages }] = await Promise.all([
+  const [members, { stages }, companies, campaigns] = await Promise.all([
     getOrgMembers(organizationId),
     getDefaultPipelineStages(organizationId),
+    getCompaniesForSelect(organizationId),
+    getCampaignsForSelect(organizationId),
   ]);
 
   return (
@@ -28,6 +32,8 @@ export default async function NovoLeadPage() {
           action={createLeadAction}
           members={members}
           stages={stages}
+          companies={companies}
+          campaigns={campaigns}
           defaults={{ ownerId: session.userId, stageId: stages[0]?.id }}
           submitLabel="Criar lead"
         />

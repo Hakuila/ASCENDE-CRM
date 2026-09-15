@@ -6,11 +6,13 @@ import {
   getLeadActivities,
   getDefaultPipelineStages,
 } from "@/lib/leads/queries";
+import { getDealForLead } from "@/lib/deals/queries";
 import { canDeleteLead } from "@/lib/permissions";
 import { Badge, stageTone } from "@/components/ui/badge";
 import { StageSelect } from "@/components/leads/stage-select";
 import { DeleteLeadButton } from "@/components/leads/delete-lead-button";
 import { LeadActivityTimeline } from "@/components/leads/lead-activity-timeline";
+import { LeadDealCard } from "@/components/deals/lead-deal-card";
 
 function formatCurrency(value: number | null) {
   if (value == null) return "—";
@@ -23,10 +25,11 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
 
   const organizationId = session.organization.id;
 
-  const [lead, activities, { stages }] = await Promise.all([
+  const [lead, activities, { stages }, deal] = await Promise.all([
     getLeadById(organizationId, params.id),
     getLeadActivities(params.id),
     getDefaultPipelineStages(organizationId),
+    getDealForLead(params.id),
   ]);
 
   if (!lead) notFound();
@@ -53,6 +56,12 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         </div>
         <div className="flex items-center gap-4">
           <Link
+            href={`/tasks/nova?leadId=${lead.id}`}
+            className="text-sm font-medium text-brand hover:underline"
+          >
+            + Tarefa
+          </Link>
+          <Link
             href={`/leads/${lead.id}/editar`}
             className="text-sm font-medium text-brand hover:underline"
           >
@@ -75,6 +84,8 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             <h2 className="mb-3 text-sm font-semibold text-gray-700">Etapa</h2>
             <StageSelect leadId={lead.id} currentStageId={lead.stage?.id ?? null} stages={stages} />
           </div>
+
+          <LeadDealCard leadId={lead.id} deal={deal as any} />
 
           <div className="rounded-xl border border-gray-100 bg-white p-5">
             <h2 className="mb-3 text-sm font-semibold text-gray-700">Contato</h2>

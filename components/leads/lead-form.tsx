@@ -25,7 +25,11 @@ type LeadFormDefaults = {
   notes?: string | null;
   ownerId?: string | null;
   stageId?: string | null;
+  companyId?: string | null;
+  campaignId?: string | null;
 };
+
+type SelectOption = { id: string; name: string };
 
 function SubmitButton({ label }: { label: string }) {
   const { pending } = useFormStatus();
@@ -41,12 +45,16 @@ export function LeadForm({
   defaults,
   members,
   stages,
+  companies,
+  campaigns,
   submitLabel,
 }: {
   action: LeadFormAction;
   defaults?: LeadFormDefaults;
   members: OrgMember[];
   stages: Stage[];
+  companies?: SelectOption[];
+  campaigns?: SelectOption[];
   submitLabel: string;
 }) {
   const [state, formAction] = useFormState<LeadFormState, FormData>(action, null);
@@ -104,6 +112,20 @@ export function LeadForm({
           </Select>
         </div>
 
+        {companies && companies.length > 0 && (
+          <div>
+            <Label htmlFor="companyId">Empresa</Label>
+            <Select id="companyId" name="companyId" defaultValue={defaults?.companyId ?? ""}>
+              <option value="">Nenhuma</option>
+              {companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+
         <div>
           <Label htmlFor="stageId">Etapa</Label>
           <Select id="stageId" name="stageId" defaultValue={defaults?.stageId ?? ""}>
@@ -133,6 +155,19 @@ export function LeadForm({
             <Label htmlFor="campaign">Campanha</Label>
             <Input id="campaign" name="campaign" defaultValue={defaults?.campaign ?? ""} />
           </div>
+          {campaigns && campaigns.length > 0 && (
+            <div>
+              <Label htmlFor="campaignId">Campanha cadastrada</Label>
+              <Select id="campaignId" name="campaignId" defaultValue={defaults?.campaignId ?? ""}>
+                <option value="">Nenhuma</option>
+                {campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
         </div>
       </details>
 

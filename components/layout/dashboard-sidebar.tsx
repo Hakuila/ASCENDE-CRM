@@ -5,6 +5,7 @@ const links = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/leads", label: "Leads" },
   { href: "/pipeline", label: "Pipeline" },
+  { href: "/deals", label: "Oportunidades" },
   { href: "/companies", label: "Empresas" },
   { href: "/tasks", label: "Tarefas" },
   { href: "/campaigns", label: "Campanhas" },

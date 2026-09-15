@@ -23,6 +23,8 @@ function parseLeadForm(formData: FormData) {
     notes: formData.get("notes"),
     ownerId: formData.get("ownerId"),
     stageId: formData.get("stageId"),
+    companyId: formData.get("companyId"),
+    campaignId: formData.get("campaignId"),
   });
 }
 
@@ -47,7 +49,7 @@ export async function createLeadAction(
     return { error: parsed.error.issues[0]?.message ?? "Dados inválidos." };
   }
 
-  const { name, email, phone, whatsapp, source, medium, campaign, value, notes, ownerId, stageId } =
+  const { name, email, phone, whatsapp, source, medium, campaign, value, notes, ownerId, stageId, companyId, campaignId } =
     parsed.data;
 
   const supabase = createClient();
@@ -78,6 +80,8 @@ export async function createLeadAction(
       owner_id: toNullable(ownerId) ?? session.userId,
       pipeline_id: pipelineId,
       stage_id: finalStageId,
+      company_id: toNullable(companyId),
+      campaign_id: toNullable(campaignId),
     })
     .select("id")
     .single();
@@ -116,7 +120,7 @@ export async function updateLeadAction(
     return { error: parsed.error.issues[0]?.message ?? "Dados inválidos." };
   }
 
-  const { name, email, phone, whatsapp, source, medium, campaign, value, notes, ownerId, stageId } =
+  const { name, email, phone, whatsapp, source, medium, campaign, value, notes, ownerId, stageId, companyId, campaignId } =
     parsed.data;
 
   const supabase = createClient();
@@ -135,6 +139,8 @@ export async function updateLeadAction(
       notes: toNullable(notes),
       owner_id: toNullable(ownerId),
       stage_id: toNullable(stageId),
+      company_id: toNullable(companyId),
+      campaign_id: toNullable(campaignId),
     })
     .eq("id", leadId)
     .eq("organization_id", session.organization.id); // defesa em profundidade — RLS já cobre isso

@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth/get-session";
 import { signOutAction } from "@/lib/auth/actions";
 import { DashboardSidebar } from "@/components/layout/dashboard-sidebar";
+import { NotificationBell } from "@/components/layout/notification-bell";
+import { getNotifications, countUnreadNotifications } from "@/lib/notifications/queries";
 
 export default async function DashboardLayout({
   children,
@@ -43,10 +45,20 @@ export default async function DashboardLayout({
     );
   }
 
+  const [notifications, unreadCount] = await Promise.all([
+    getNotifications(session.userId),
+    countUnreadNotifications(session.userId),
+  ]);
+
   return (
     <div className="flex">
       <DashboardSidebar orgName={session.organization.name} />
-      <main className="flex-1 p-8">{children}</main>
+      <div className="flex-1">
+        <header className="flex items-center justify-end border-b border-gray-100 bg-white px-6 py-3">
+          <NotificationBell notifications={notifications} unreadCount={unreadCount} />
+        </header>
+        <main className="p-8">{children}</main>
+      </div>
     </div>
   );
 }

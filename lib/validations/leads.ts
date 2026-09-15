@@ -38,6 +38,8 @@ export const leadSchema = z.object({
   notes: z.string().trim().optional().or(z.literal("")),
   ownerId: z.string().uuid().optional().or(z.literal("")),
   stageId: z.string().uuid().optional().or(z.literal("")),
+  companyId: z.string().uuid().optional().or(z.literal("")),
+  campaignId: z.string().uuid().optional().or(z.literal("")),
 });
 
 export type LeadInput = z.infer<typeof leadSchema>;
