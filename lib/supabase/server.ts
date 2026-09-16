@@ -1,3 +1,4 @@
+import "server-only";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import type { Database } from "@/types/database";
@@ -9,6 +10,11 @@ import type { Database } from "@/types/database";
  *
  * Importante: @supabase/ssr >= 0.4 usa a API getAll/setAll (não get/set/remove).
  * Usar a API antiga faz a leitura da sessão falhar silenciosamente.
+ *
+ * P1-07: o client com a service role (que ignora RLS) foi movido para
+ * lib/supabase/admin.ts — não vive mais aqui, para reduzir o risco de
+ * alguém importar acidentalmente o client administrativo a partir de um
+ * arquivo pensado para rodar no contexto do usuário comum.
  */
 export function createClient() {
   const cookieStore = cookies();
@@ -33,18 +39,5 @@ export function createClient() {
         },
       },
     }
-  );
-}
-
-/**
- * Cliente com a service role key — ignora RLS.
- * Uso restrito a: webhooks (ex.: Meta Lead Ads) e jobs internos de backend.
- * NUNCA importar este arquivo em código que roda no browser.
- */
-export function createServiceRoleClient() {
-  return createServerClient<Database>(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { cookies: { getAll: () => [], setAll: () => {} } }
   );
 }

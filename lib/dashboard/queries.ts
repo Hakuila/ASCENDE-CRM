@@ -36,27 +36,32 @@ export async function getDashboardMetrics(
       .from("leads")
       .select("id", { count: "exact", head: true })
       .eq("organization_id", organizationId),
+    // Aquisição de Lead: sempre por created_at (data em que o Lead entrou).
     supabase
       .from("leads")
       .select("id", { count: "exact", head: true })
       .eq("organization_id", organizationId)
       .gte("created_at", fromIso)
       .lte("created_at", toIso),
+    // Oportunidade: created_at é a data correta (quando o Deal foi aberto).
     supabase
       .from("deals")
       .select("id", { count: "exact", head: true })
       .eq("organization_id", organizationId)
       .gte("created_at", fromIso)
       .lte("created_at", toIso),
-    // "Vendas" = deals ganhos cuja última atualização (mudança de status) caiu
-    // no período — não temos uma coluna closed_at dedicada no schema atual.
+    // P0-03: "Vendas"/receita usam closed_at — a data real de fechamento —
+    // e não updated_at, que muda a cada edição do Deal por qualquer motivo.
+    // Rows com closed_at null (não deveria acontecer após o backfill da
+    // migration 0007, mas por segurança) são naturalmente excluídas pelo
+    // gte/lte, já que comparação com null nunca é verdadeira no Postgres.
     supabase
       .from("deals")
-      .select("value, updated_at")
+      .select("value, closed_at")
       .eq("organization_id", organizationId)
       .eq("status", "won")
-      .gte("updated_at", fromIso)
-      .lte("updated_at", toIso),
+      .gte("closed_at", fromIso)
+      .lte("closed_at", toIso),
     supabase
       .from("deals")
       .select("value")
@@ -65,8 +70,9 @@ export async function getDashboardMetrics(
     supabase.from("campaigns").select("spend").eq("organization_id", organizationId),
   ]);
 
-  const sales = wonDeals?.length ?? 0;
-  const revenue = (wonDeals ?? []).reduce((sum, d) => sum + (d.value ?? 0), 0);
+  const wonDealsInRange = (wonDeals ?? []).filter((d) => d.closed_at != null);
+  const sales = wonDealsInRange.length;
+  const revenue = wonDealsInRange.reduce((sum, d) => sum + (d.value ?? 0), 0);
   const potentialValue = (openDeals ?? []).reduce((sum, d) => sum + (d.value ?? 0), 0);
 
   const totalSpend = (campaignsSpend ?? []).reduce((sum, c) => sum + (c.spend ?? 0), 0);
@@ -128,19 +134,24 @@ export async function getLeadsBySource(organizationId: string, range: DateRange)
     .map(([source, count]) => ({ source, count }));
 }
 
+/**
+ * P0-03: agrupa vendas por dia usando closed_at (data real de fechamento),
+ * não updated_at.
+ */
 export async function getSalesByDay(organizationId: string, range: DateRange) {
   const supabase = createClient();
   const { data } = await supabase
     .from("deals")
-    .select("value, updated_at")
+    .select("value, closed_at")
     .eq("organization_id", organizationId)
     .eq("status", "won")
-    .gte("updated_at", range.from.toISOString())
-    .lte("updated_at", range.to.toISOString());
+    .gte("closed_at", range.from.toISOString())
+    .lte("closed_at", range.to.toISOString());
 
   const byDay = new Map<string, number>();
   for (const deal of data ?? []) {
-    const day = deal.updated_at.slice(0, 10);
+    if (!deal.closed_at) continue;
+    const day = deal.closed_at.slice(0, 10);
     byDay.set(day, (byDay.get(day) ?? 0) + (deal.value ?? 0));
   }
   return Array.from(byDay.entries())
@@ -148,18 +159,32 @@ export async function getSalesByDay(organizationId: string, range: DateRange) {
     .map(([date, value]) => ({ date, value }));
 }
 
+type WonDealWithLeadSource = {
+  value: number | null;
+  closed_at: string | null;
+  lead: { source: string | null } | null;
+};
+
+/**
+ * P0-03: receita por origem usando closed_at (data real de fechamento),
+ * não updated_at.
+ */
 export async function getRevenueBySource(organizationId: string, range: DateRange) {
   const supabase = createClient();
   const { data } = await supabase
     .from("deals")
-    .select("value, updated_at, lead:leads(source)")
+    .select("value, closed_at, lead:leads(source)")
     .eq("organization_id", organizationId)
     .eq("status", "won")
-    .gte("updated_at", range.from.toISOString())
-    .lte("updated_at", range.to.toISOString());
+    .gte("closed_at", range.from.toISOString())
+    .lte("closed_at", range.to.toISOString());
 
   const bySource = new Map<string, number>();
-  for (const deal of (data ?? []) as any[]) {
+  // NOTA (P0-06): o cast abaixo continua necessário até types/database.ts
+  // ser gerado a partir do schema real; hoje o client Supabase não infere
+  // o formato do embed lead:leads(source).
+  for (const deal of (data ?? []) as unknown as WonDealWithLeadSource[]) {
+    if (!deal.closed_at) continue;
     const source = deal.lead?.source || "Não informado";
     bySource.set(source, (bySource.get(source) ?? 0) + (deal.value ?? 0));
   }

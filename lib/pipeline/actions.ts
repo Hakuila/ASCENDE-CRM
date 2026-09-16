@@ -27,6 +27,25 @@ async function getDefaultPipelineId(organizationId: string) {
   return data?.id ?? null;
 }
 
+/**
+ * P1-09: confirma explicitamente que a etapa pertence à organização da
+ * sessão atual antes de qualquer update/delete. RLS já bloqueia o acesso
+ * cross-tenant no banco, mas essa checagem evita depender apenas disso e
+ * permite retornar um erro claro (em vez de um erro genérico de RLS) para
+ * a UI.
+ */
+async function getOwnedStage(stageId: string, organizationId: string) {
+  const supabase = createClient();
+  const { data } = await supabase
+    .from("pipeline_stages")
+    .select("id, pipeline_id, organization_id")
+    .eq("id", stageId)
+    .maybeSingle();
+
+  if (!data || data.organization_id !== organizationId) return null;
+  return data;
+}
+
 export async function createStageAction(
   _prevState: StageFormState,
   formData: FormData
@@ -73,7 +92,7 @@ export async function updateStageAction(
   _prevState: StageFormState,
   formData: FormData
 ): Promise<StageFormState> {
-  await requireAdminSession();
+  const session = await requireAdminSession();
   const parsed = stageSchema.safeParse({
     name: formData.get("name"),
     kind: formData.get("kind"),
@@ -81,6 +100,10 @@ export async function updateStageAction(
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Dados inválidos." };
   }
+
+  const organizationId = session.organization!.id;
+  const stage = await getOwnedStage(stageId, organizationId);
+  if (!stage) return { error: "Etapa não encontrada." };
 
   const supabase = createClient();
   const { error } = await supabase
@@ -95,47 +118,85 @@ export async function updateStageAction(
   return null;
 }
 
-export async function deleteStageAction(stageId: string) {
-  await requireAdminSession();
+/**
+ * P1-04: bloqueia a exclusão de etapas que ainda têm Leads ou Deals
+ * vinculados. Antes, o "ON DELETE SET NULL" deixava esses registros sem
+ * etapa silenciosamente. Agora a ação falha com uma mensagem explicando o
+ * motivo, exigindo que o usuário mova os registros antes de excluir.
+ *
+ * IMPORTANTE: a assinatura foi mantida como `(stageId: string)` para não
+ * quebrar quem já chama esta action, mas ela passou a retornar
+ * `StageFormState` em vez de `void`. Se o componente que chama esta action
+ * hoje ignora o retorno (ex.: `onClick={() => deleteStageAction(id)}`),
+ * ele vai continuar funcionando, mas o erro não será exibido ao usuário —
+ * vale atualizar esse componente para tratar `{ error }` quando ele vier
+ * (me envie o arquivo, ex. da página /pipeline/etapas, que eu ajusto).
+ */
+export async function deleteStageAction(stageId: string): Promise<StageFormState> {
+  const session = await requireAdminSession();
+  const organizationId = session.organization!.id;
+
+  const stage = await getOwnedStage(stageId, organizationId);
+  if (!stage) return { error: "Etapa não encontrada." };
+
   const supabase = createClient();
-  // leads/deals nessa etapa ficam com stage_id = null (ON DELETE SET NULL).
-  await supabase.from("pipeline_stages").delete().eq("id", stageId);
+
+  const [{ count: leadsCount, error: leadsError }, { count: dealsCount, error: dealsError }] =
+    await Promise.all([
+      supabase
+        .from("leads")
+        .select("id", { count: "exact", head: true })
+        .eq("stage_id", stageId),
+      supabase
+        .from("deals")
+        .select("id", { count: "exact", head: true })
+        .eq("stage_id", stageId),
+    ]);
+
+  if (leadsError || dealsError) {
+    return { error: "Não foi possível verificar os vínculos da etapa." };
+  }
+
+  if ((leadsCount ?? 0) > 0 || (dealsCount ?? 0) > 0) {
+    return {
+      error:
+        "Não é possível excluir esta etapa: existem Leads ou Oportunidades vinculados a ela. Mova-os para outra etapa antes de excluir.",
+    };
+  }
+
+  const { error } = await supabase.from("pipeline_stages").delete().eq("id", stageId);
+  if (error) return { error: "Não foi possível excluir a etapa." };
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");
+  return null;
 }
 
-export async function reorderStageAction(stageId: string, direction: "up" | "down") {
+/**
+ * P0-01: a troca de order_index agora acontece inteira dentro de uma
+ * transação de banco (RPC `reorder_pipeline_stage`), eliminando a colisão
+ * com a constraint UNIQUE (pipeline_id, order_index) que existia ao fazer
+ * dois updates sequenciais a partir do client. Ver migration 0007.
+ */
+export async function reorderStageAction(
+  stageId: string,
+  direction: "up" | "down"
+): Promise<StageFormState> {
   const session = await requireAdminSession();
-  const supabase = createClient();
   const organizationId = session.organization!.id;
-  const pipelineId = await getDefaultPipelineId(organizationId);
-  if (!pipelineId) return;
 
-  const { data: stages } = await supabase
-    .from("pipeline_stages")
-    .select("id, order_index")
-    .eq("pipeline_id", pipelineId)
-    .order("order_index", { ascending: true });
+  const stage = await getOwnedStage(stageId, organizationId);
+  if (!stage) return { error: "Etapa não encontrada." };
 
-  if (!stages) return;
+  const supabase = createClient();
+  const { error } = await supabase.rpc("reorder_pipeline_stage", {
+    p_stage_id: stageId,
+    p_direction: direction,
+  });
 
-  const index = stages.findIndex((s) => s.id === stageId);
-  const swapIndex = direction === "up" ? index - 1 : index + 1;
-  if (index < 0 || swapIndex < 0 || swapIndex >= stages.length) return;
-
-  const current = stages[index];
-  const swapWith = stages[swapIndex];
-
-  await supabase
-    .from("pipeline_stages")
-    .update({ order_index: swapWith.order_index })
-    .eq("id", current.id);
-  await supabase
-    .from("pipeline_stages")
-    .update({ order_index: current.order_index })
-    .eq("id", swapWith.id);
+  if (error) return { error: "Não foi possível reordenar as etapas." };
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");
+  return null;
 }
