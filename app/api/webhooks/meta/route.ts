@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/admin";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { findOrganizationByMetaPageId } from "@/lib/integrations/queries";
 import { fetchMetaLeadData, extractField } from "@/lib/integrations/meta";
 
@@ -44,6 +45,15 @@ function isValidSignature(rawBody: string, signatureHeader: string | null): bool
 }
 
 export async function POST(request: NextRequest) {
+  // P1-02: rate limit por IP como defesa extra além da assinatura HMAC —
+  // se o App Secret algum dia vazar, isso ainda limita o dano de um flood.
+  // Limite generoso porque o próprio Meta pode enviar rajadas legítimas.
+  const ip = getClientIp(request);
+  const ipLimit = await checkRateLimit(`meta-webhook-ip:${ip}`, 60, 120);
+  if (!ipLimit.allowed) {
+    return new NextResponse("Too Many Requests", { status: 429, headers: { "Retry-After": "60" } });
+  }
+
   const rawBody = await request.text();
   const signature = request.headers.get("x-hub-signature-256");
 
@@ -85,7 +95,22 @@ async function processLeadgenEvent(
     return;
   }
 
-  const pageAccessToken = org.config.page_access_token;
+  // P0-07: o token não vive mais em org.config.page_access_token (texto
+  // puro) — foi movido para o Supabase Vault. Decifra via RPC restrita à
+  // service_role (este arquivo já roda com ela, ver createServiceRoleClient
+  // acima).
+  const { data: pageAccessToken, error: secretError } = await supabase.rpc(
+    "get_integration_secret",
+    { p_organization_id: org.organization_id, p_provider: "meta_ads" }
+  );
+
+  if (secretError) {
+    console.error(
+      `[meta webhook] falha ao obter token da organização ${org.organization_id}:`,
+      secretError.message
+    );
+    return;
+  }
   if (!pageAccessToken) {
     console.error(`[meta webhook] organização ${org.organization_id} sem token de acesso configurado`);
     return;

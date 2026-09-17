@@ -8,6 +8,20 @@ import { metaIntegrationSchema } from "@/lib/validations/integrations";
 
 export type IntegrationFormState = { error?: string; success?: boolean } | null;
 
+/**
+ * P0-07: page_access_token nunca mais é gravado em texto puro dentro de
+ * integrations.config. O fluxo agora é em duas etapas:
+ *
+ *   1) upsert de integrations com config = { page_id } (não sensível);
+ *   2) RPC set_integration_secret, que grava/rotaciona o token cifrado no
+ *      Supabase Vault e guarda só a referência (access_token_secret_id) na
+ *      linha da integração.
+ *
+ * Nenhuma Server Action deste arquivo lê o token de volta para exibir na
+ * UI — a função que decifra (get_integration_secret) é restrita à
+ * service_role e só deve ser chamada pelo job/webhook que efetivamente
+ * fala com a API do Meta (via lib/supabase/admin.ts).
+ */
 export async function saveMetaIntegrationAction(
   _prevState: IntegrationFormState,
   formData: FormData
@@ -26,17 +40,33 @@ export async function saveMetaIntegrationAction(
   }
 
   const supabase = createClient();
-  const { error } = await supabase.from("integrations").upsert(
+  const organizationId = session.organization.id;
+
+  const { error: upsertError } = await supabase.from("integrations").upsert(
     {
-      organization_id: session.organization.id,
+      organization_id: organizationId,
       provider: "meta_ads",
       is_active: true,
-      config: { page_id: parsed.data.pageId, page_access_token: parsed.data.pageAccessToken },
+      // Só o page_id (não sensível) vai no JSONB — o token vai para o Vault.
+      config: { page_id: parsed.data.pageId },
     },
     { onConflict: "organization_id,provider" }
   );
 
-  if (error) return { error: "Não foi possível salvar a integração." };
+  if (upsertError) return { error: "Não foi possível salvar a integração." };
+
+  const { error: secretError } = await supabase.rpc("set_integration_secret", {
+    p_organization_id: organizationId,
+    p_provider: "meta_ads",
+    p_secret: parsed.data.pageAccessToken,
+  });
+
+  if (secretError) {
+    return {
+      error:
+        "A integração foi salva, mas não foi possível gravar o token com segurança. Tente salvar novamente.",
+    };
+  }
 
   revalidatePath("/integrations");
   return { success: true };

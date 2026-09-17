@@ -1,8 +1,9 @@
 "use server";
 
+import { randomInt } from "crypto";
 import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/auth/get-session";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { inviteClientSchema } from "@/lib/validations/agency";
 
 export type InviteClientState =
@@ -13,14 +14,45 @@ export type InviteClientState =
 /**
  * Gera uma senha temporária legível o suficiente para digitar/copiar, mas
  * forte o bastante para não ser um risco (letras, números, símbolo).
+ *
+ * P1-06: Math.random() é um PRNG comum, não criptográfico — previsível o
+ * suficiente para não ser apropriado para gerar credenciais, mesmo
+ * temporárias. crypto.randomInt() usa a fonte de aleatoriedade segura do
+ * sistema operacional.
  */
 function generateTempPassword(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
   let base = "";
   for (let i = 0; i < 10; i++) {
-    base += alphabet[Math.floor(Math.random() * alphabet.length)];
+    base += alphabet[randomInt(0, alphabet.length)];
   }
   return `${base}!9`;
+}
+
+/**
+ * P1-08: desfaz a criação do usuário no Auth quando a etapa seguinte do
+ * provisionamento falha, para não deixar um usuário órfão (sem
+ * organização/sem papel nenhum, mas existindo em auth.users). Usada tanto
+ * por inviteClientAction quanto createStaffAction — mesmo padrão de duas
+ * escritas não-transacionais nos dois fluxos.
+ *
+ * Se o próprio rollback falhar, cai no aviso manual anterior — mas isso
+ * agora é o caso excepcional, não o caminho normal de erro.
+ */
+async function rollbackCreatedUser(
+  admin: ReturnType<typeof createServiceRoleClient>,
+  userId: string,
+  email: string,
+  originalErrorMessage: string
+): Promise<string> {
+  const { error: rollbackError } = await admin.auth.admin.deleteUser(userId);
+
+  if (rollbackError) {
+    console.error(`[agency] falha no rollback do usuário ${userId}:`, rollbackError.message);
+    return `Conta criada, mas falhou ao concluir o provisionamento (${originalErrorMessage}) e não foi possível desfazer automaticamente. Delete o usuário "${email}" em Authentication → Users e tente de novo.`;
+  }
+
+  return `Não foi possível concluir o provisionamento de "${email}". Tente novamente.`;
 }
 
 /**
@@ -76,11 +108,10 @@ export async function inviteClientAction(
   });
 
   if (rpcError) {
-    // A conta já foi criada em auth.users; melhor avisar claramente do que
-    // deixar um usuário "fantasma" sem organização e sem explicação.
-    return {
-      error: `Conta criada, mas falhou ao criar a organização: ${rpcError.message}. Delete o usuário "${adminEmail}" em Authentication → Users e tente de novo.`,
-    };
+    // P1-08: antes só avisava para deletar manualmente — agora tenta
+    // desfazer a criação do usuário primeiro.
+    const error = await rollbackCreatedUser(admin, created.user.id, adminEmail, rpcError.message);
+    return { error };
   }
 
   return { success: true, email: adminEmail, tempPassword };
@@ -137,9 +168,9 @@ export async function createStaffAction(
     .insert({ user_id: created.user.id });
 
   if (insertError) {
-    return {
-      error: `Conta criada, mas falhou ao marcar como staff: ${insertError.message}. Delete o usuário "${email}" em Authentication → Users e tente de novo.`,
-    };
+    // P1-08: mesmo tratamento — tenta desfazer antes de pedir ação manual.
+    const error = await rollbackCreatedUser(admin, created.user.id, email, insertError.message);
+    return { error };
   }
 
   return { success: true, email, tempPassword };

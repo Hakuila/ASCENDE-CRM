@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/admin";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 /**
  * POST /api/leads/capture
@@ -10,6 +11,17 @@ import { createServiceRoleClient } from "@/lib/supabase/server";
  * capturadas da URL. Autenticado pela `public_api_key` da organização
  * (gerada automaticamente na criação dela, visível/regenerável em
  * /integrations) — não dá acesso de leitura a nada, só cria leads.
+ *
+ * P1-07: createServiceRoleClient agora mora em lib/supabase/admin (não
+ * mais em lib/supabase/server) — só o import mudou, comportamento igual.
+ *
+ * P1-02: rate limiting em duas camadas —
+ *   1) por IP, ANTES de qualquer consulta ao banco: barra flood genérico
+ *      de quem nem sequer tem uma api_key válida;
+ *   2) por organização (depois de validar a api_key): protege um tenant
+ *      específico caso a própria key dele vaze ou seja usada indevidamente,
+ *      sem penalizar outras organizações que dividem o mesmo IP de origem
+ *      (ex.: uma mesma landing page builder usada por vários clientes).
  *
  * Exemplo de payload:
  * {
@@ -52,6 +64,16 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: NextRequest) {
+  // Camada 1: por IP, antes de tocar no banco para validar a api_key.
+  const ip = getClientIp(request);
+  const ipLimit = await checkRateLimit(`leads-capture-ip:${ip}`, 60, 30);
+  if (!ipLimit.allowed) {
+    return NextResponse.json(
+      { error: "Muitas requisições. Tente novamente em instantes." },
+      { status: 429, headers: { ...corsHeaders(), "Retry-After": "60" } }
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();
@@ -79,6 +101,15 @@ export async function POST(request: NextRequest) {
   if (!org) {
     // Não revela se a chave existe ou não pertence a ninguém — só "inválida".
     return NextResponse.json({ error: "Chave de API inválida." }, { status: 401, headers: corsHeaders() });
+  }
+
+  // Camada 2: por organização, agora que sabemos qual é.
+  const orgLimit = await checkRateLimit(`leads-capture-org:${org.id}`, 60, 60);
+  if (!orgLimit.allowed) {
+    return NextResponse.json(
+      { error: "Limite de envios desta integração atingido. Tente novamente em instantes." },
+      { status: 429, headers: { ...corsHeaders(), "Retry-After": "60" } }
+    );
   }
 
   const { data: pipeline } = await supabase

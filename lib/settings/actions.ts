@@ -1,8 +1,10 @@
 "use server";
 
+import { randomInt } from "crypto";
 import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/auth/get-session";
-import { createClient, createServiceRoleClient } from "@/lib/supabase/server";
+import { createClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { canManageOrgUsers, isOrgAdmin } from "@/lib/permissions";
 import { organizationProfileSchema, inviteTeamMemberSchema } from "@/lib/validations/settings";
 
@@ -16,10 +18,18 @@ function toNullable(v: string | undefined) {
   return v && v.length > 0 ? v : null;
 }
 
+/**
+ * P1-06: Math.random() não é criptograficamente seguro — é um PRNG
+ * previsível (não desenhado para segredos), então uma senha temporária
+ * gerada com ele é, em tese, adivinhável por quem conseguir observar
+ * amostras suficientes do gerador. crypto.randomInt() usa a fonte de
+ * aleatoriedade segura do sistema operacional (CSPRNG), apropriada para
+ * credenciais.
+ */
 function generateTempPassword(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
   let base = "";
-  for (let i = 0; i < 10; i++) base += alphabet[Math.floor(Math.random() * alphabet.length)];
+  for (let i = 0; i < 10; i++) base += alphabet[randomInt(0, alphabet.length)];
   return `${base}!9`;
 }
 
@@ -65,6 +75,15 @@ export async function updateOrganizationAction(
 // ---------------------------------------------------------------------------
 // CONVIDAR MEMBRO DA EQUIPE (mesma organização — senha temporária, sem e-mail)
 // ---------------------------------------------------------------------------
+/**
+ * P1-08 (mesmo padrão do lib/agency/actions.ts): createUser() e o insert em
+ * memberships são duas escritas separadas sem transação entre elas — se a
+ * segunda falhar, o usuário criado no Auth fica órfão (sem organização,
+ * sem como logar em lugar nenhum útil). Antes, a única saída era pedir pro
+ * admin apagar manualmente pelo painel do Supabase. Agora, se o insert de
+ * membership falhar, tentamos desfazer (deletar o usuário do Auth) antes
+ * de responder — o fluxo fica efetivamente tudo-ou-nada.
+ */
 export async function inviteTeamMemberAction(
   _prevState: InviteMemberState,
   formData: FormData
@@ -109,9 +128,23 @@ export async function inviteTeamMemberAction(
   });
 
   if (membershipError) {
-    return {
-      error: `Conta criada, mas falhou ao adicionar à equipe: ${membershipError.message}. Delete o usuário "${email}" em Authentication → Users e tente de novo.`,
-    };
+    // Rollback: desfaz a criação do usuário no Auth para não deixar órfão.
+    const { error: rollbackError } = await admin.auth.admin.deleteUser(created.user.id);
+
+    if (rollbackError) {
+      // Pior caso: nem a escrita original nem o rollback funcionaram.
+      // Aí sim precisa de intervenção manual — mas isso agora é exceção,
+      // não o caminho normal de erro.
+      console.error(
+        `[inviteTeamMemberAction] falha no rollback do usuário ${created.user.id}:`,
+        rollbackError.message
+      );
+      return {
+        error: `Conta criada, mas falhou ao adicionar à equipe (${membershipError.message}) e não foi possível desfazer automaticamente. Delete o usuário "${email}" em Authentication → Users e tente de novo.`,
+      };
+    }
+
+    return { error: `Não foi possível adicionar "${email}" à equipe. Tente novamente.` };
   }
 
   revalidatePath("/settings");

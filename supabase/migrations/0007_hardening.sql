@@ -337,3 +337,278 @@ create trigger trg_notifications_user_same_org
 -- tratado na camada de aplicação (lib/pipeline/actions.ts,
 -- lib/leads/actions.ts) como parte do item P1-09.
 -- ----------------------------------------------------------------------------
+-- ============================================================================
+-- P0-07: token de integração (Meta Ads) fora do JSONB, via Supabase Vault
+--
+-- Problema: page_access_token era gravado em texto puro dentro de
+-- integrations.config (jsonb) — qualquer leitura da tabela (incluindo
+-- backups, réplicas, um bug de RLS futuro, etc.) expõe o token do Meta em
+-- claro. Tokens de API de terceiros são segredo, não configuração.
+--
+-- Solução: Supabase Vault (extensão de criptografia at-rest nativa do
+-- projeto) guarda o valor cifrado; a tabela integrations passa a guardar
+-- apenas o ID do segredo (access_token_secret_id), que sozinho não serve
+-- para nada sem passar pelas funções abaixo.
+--
+-- Acesso ao valor decifrado é restrito à service_role (nunca ao usuário
+-- autenticado comum) — na prática, só o job/webhook que efetivamente chama
+-- a API do Meta (rodando com lib/supabase/admin.ts, ver P1-07) consegue
+-- decifrar o token.
+-- ============================================================================
+
+-- Normalmente já vem habilitada em projetos Supabase; o "if not exists"
+-- evita erro caso já esteja.
+create extension if not exists supabase_vault with schema vault;
+
+alter table public.integrations
+  add column if not exists access_token_secret_id uuid;
+
+comment on column public.integrations.access_token_secret_id is
+  'P0-07: referência ao segredo no Supabase Vault (vault.secrets). O valor '
+  'em si NUNCA fica em texto puro nesta tabela — ver funções '
+  'set_integration_secret / get_integration_secret.';
+
+-- Grava ou rotaciona o token cifrado. Quem chama precisa ser admin da
+-- organização (mesma regra de canManageIntegrations aplicada em app, +
+-- reforço aqui no banco).
+create or replace function public.set_integration_secret(
+  p_organization_id uuid,
+  p_provider text,
+  p_secret text
+) returns void
+language plpgsql
+security definer
+set search_path = public, vault
+as $$
+declare
+  v_existing_secret_id uuid;
+  v_new_secret_id uuid;
+begin
+  if not public.is_org_admin(p_organization_id, auth.uid()) then
+    raise exception 'Apenas administradores podem configurar integrações.';
+  end if;
+
+  select access_token_secret_id into v_existing_secret_id
+  from public.integrations
+  where organization_id = p_organization_id and provider = p_provider;
+
+  if not found then
+    raise exception 'Integração % não encontrada para esta organização. Salve a configuração antes de definir o token.', p_provider;
+  end if;
+
+  if v_existing_secret_id is not null then
+    -- Token já existia (ex.: reconexão) — rotaciona o valor no mesmo segredo.
+    perform vault.update_secret(v_existing_secret_id, p_secret);
+  else
+    v_new_secret_id := vault.create_secret(
+      p_secret,
+      p_organization_id::text || ':' || p_provider,
+      'Token de acesso da integração ' || p_provider
+    );
+    update public.integrations
+      set access_token_secret_id = v_new_secret_id
+      where organization_id = p_organization_id and provider = p_provider;
+  end if;
+end;
+$$;
+
+comment on function public.set_integration_secret(uuid, text, text) is
+  'P0-07: grava/rotaciona no Vault o segredo de uma integração. Só admins '
+  'da organização (is_org_admin) podem chamar.';
+
+revoke execute on function public.set_integration_secret(uuid, text, text) from public;
+grant execute on function public.set_integration_secret(uuid, text, text) to authenticated;
+
+-- Decifra o token. Restrito à service_role: NUNCA exposto ao client
+-- autenticado como usuário comum, mesmo admin de organização — a UI não
+-- precisa (e não deve) reexibir o token depois de salvo.
+create or replace function public.get_integration_secret(
+  p_organization_id uuid,
+  p_provider text
+) returns text
+language plpgsql
+security definer
+set search_path = public, vault
+as $$
+declare
+  v_secret_id uuid;
+  v_decrypted text;
+begin
+  select access_token_secret_id into v_secret_id
+  from public.integrations
+  where organization_id = p_organization_id and provider = p_provider;
+
+  if v_secret_id is null then
+    return null;
+  end if;
+
+  select decrypted_secret into v_decrypted
+  from vault.decrypted_secrets
+  where id = v_secret_id;
+
+  return v_decrypted;
+end;
+$$;
+
+comment on function public.get_integration_secret(uuid, text) is
+  'P0-07: decifra o token de uma integração. Só a service_role pode '
+  'executar — nunca conceder a authenticated/anon.';
+
+revoke execute on function public.get_integration_secret(uuid, text) from public, authenticated, anon;
+grant execute on function public.get_integration_secret(uuid, text) to service_role;
+
+-- ----------------------------------------------------------------------------
+-- Backfill: migra qualquer page_access_token já salvo em config (texto
+-- puro) para o Vault, então remove a chave do JSONB.
+--
+-- ATENÇÃO: isto roda como o dono da migration (geralmente postgres/service
+-- role via CLI), então tem permissão de chamar vault.create_secret
+-- diretamente. Se sua ferramenta de migration rodar com um role sem essa
+-- permissão, rode este bloco manualmente com a service role.
+-- ----------------------------------------------------------------------------
+
+do $$
+declare
+  r record;
+  v_secret_id uuid;
+begin
+  for r in
+    select organization_id, provider, config->>'page_access_token' as token
+    from public.integrations
+    where config ? 'page_access_token'
+      and config->>'page_access_token' is not null
+      and config->>'page_access_token' <> ''
+  loop
+    v_secret_id := vault.create_secret(
+      r.token,
+      r.organization_id::text || ':' || r.provider,
+      'Token migrado do config JSONB (P0-07)'
+    );
+
+    update public.integrations
+      set access_token_secret_id = v_secret_id,
+          config = config - 'page_access_token'
+      where organization_id = r.organization_id and provider = r.provider;
+  end loop;
+end $$;
+
+-- ============================================================================
+-- P0-08: uma organização por usuário (regra do MVP)
+--
+-- Hoje só existe unique(organization_id, user_id) em memberships — isso
+-- impede duplicar a MESMA combinação, mas não impede o mesmo usuário
+-- pertencer a DUAS organizações diferentes. As duas funções de criação de
+-- organização (create_organization_with_admin, create_organization_for_user)
+-- já checam isso em nível de aplicação, mas qualquer outro caminho que
+-- insira direto em memberships (ex.: um futuro fluxo de convite para
+-- adicionar um salesperson a uma organização) não passa por nenhuma delas
+-- — e getSession() já pressupõe uma organização só (usa .maybeSingle()).
+--
+-- Esta constraint fecha a lacuna para QUALQUER caminho de escrita, atual
+-- ou futuro, sem depender de cada função de aplicação lembrar de checar.
+--
+-- Caso o produto precise de multi-organização no futuro, a migração de
+-- saída é: remover esta constraint + implementar conceito de "organização
+-- ativa" na sessão (cookie/param indicando qual das organizações do
+-- usuário está em uso), como o próprio plano de ajustes sugere.
+-- ----------------------------------------------------------------------------
+-- ATENÇÃO: se algum usuário já estiver em mais de uma organização hoje,
+-- este comando falha. Rode antes:
+--
+--   select user_id, count(*) from public.memberships
+--   group by user_id having count(*) > 1;
+--
+-- e decida manualmente qual organização cada usuário deve manter.
+-- ============================================================================
+
+alter table public.memberships
+  add constraint memberships_one_org_per_user unique (user_id);
+
+-- ============================================================================
+-- P1-02: rate limiting persistido (login, recuperação, API pública, webhooks)
+--
+-- Um contador em memória (Map/objeto no processo Node) NÃO funciona em
+-- ambiente serverless: cada invocação pode cair numa instância diferente,
+-- sem estado compartilhado, então o limite nunca é atingido de verdade.
+-- Persistimos os contadores no Postgres, com incremento atômico via
+-- INSERT ... ON CONFLICT (evita race condition entre requisições
+-- concorrentes que um "SELECT então UPDATE" teria).
+--
+-- Algoritmo: fixed window (janela fixa) — simples e suficiente para os
+-- casos de uso aqui (login, recuperação de senha, API pública, webhook).
+-- ============================================================================
+
+create table if not exists public.rate_limit_hits (
+  key text not null,
+  window_start timestamptz not null,
+  count int not null default 1,
+  primary key (key, window_start)
+);
+
+comment on table public.rate_limit_hits is
+  'P1-02: contadores de rate limiting por janela fixa. Não é acessada '
+  'diretamente pelo client — só através de check_rate_limit(). Linhas '
+  'antigas devem ser podadas periodicamente (ver cleanup_rate_limit_hits).';
+
+create or replace function public.check_rate_limit(
+  p_key text,
+  p_window_seconds int,
+  p_max_requests int
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_window_start timestamptz;
+  v_count int;
+begin
+  -- Arredonda "agora" para o início da janela atual (ex.: janela de 60s
+  -- às 14:32:47 vira 14:32:00) — todas as requisições da mesma janela
+  -- incrementam a mesma linha.
+  v_window_start := to_timestamp(
+    floor(extract(epoch from now()) / p_window_seconds) * p_window_seconds
+  );
+
+  insert into public.rate_limit_hits (key, window_start, count)
+  values (p_key, v_window_start, 1)
+  on conflict (key, window_start)
+    do update set count = public.rate_limit_hits.count + 1
+  returning count into v_count;
+
+  return jsonb_build_object(
+    'allowed', v_count <= p_max_requests,
+    'remaining', greatest(p_max_requests - v_count, 0)
+  );
+end;
+$$;
+
+comment on function public.check_rate_limit(text, int, int) is
+  'P1-02: incrementa atomicamente o contador de <p_key> na janela atual de '
+  '<p_window_seconds>s e retorna {allowed, remaining} contra o limite '
+  '<p_max_requests>. Restrita à service_role — chamada só a partir de '
+  'lib/rate-limit.ts (Route Handlers e middleware), nunca do client.';
+
+revoke all on function public.check_rate_limit(text, int, int) from public, authenticated, anon;
+grant execute on function public.check_rate_limit(text, int, int) to service_role;
+
+-- Poda linhas antigas — sem isso a tabela cresce indefinidamente. Rodar
+-- periodicamente (ex.: via pg_cron, se disponível no seu plano Supabase,
+-- ou uma Edge Function agendada). Não agendamos automaticamente aqui para
+-- não presumir que pg_cron está habilitado no projeto.
+create or replace function public.cleanup_rate_limit_hits()
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  delete from public.rate_limit_hits where window_start < now() - interval '1 day';
+$$;
+
+comment on function public.cleanup_rate_limit_hits() is
+  'P1-02: remove contadores de rate limit com mais de 1 dia. Agendar via '
+  'pg_cron (select cron.schedule(...)) ou uma Edge Function com cron '
+  'trigger — não roda sozinha.';
+
+revoke all on function public.cleanup_rate_limit_hits() from public, authenticated, anon;
+grant execute on function public.cleanup_rate_limit_hits() to service_role;

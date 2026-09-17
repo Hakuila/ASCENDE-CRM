@@ -84,21 +84,30 @@ function KanbanColumn({ stage }: { stage: KanbanStage }) {
 
 export function KanbanBoard({ initialStages }: { initialStages: KanbanStage[] }) {
   const [stages, setStages] = useState(initialStages);
+  const [error, setError] = useState<string | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
   );
 
-  function handleDragEnd(event: DragEndEvent) {
+  async function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     if (!over) return;
 
     const leadId = String(active.id);
     const newStageId = String(over.id);
 
-    const currentStage = stages.find((s) => s.leads.some((l) => l.id === leadId));
+    // P1-01: snapshot do estado ANTES do update otimista, para poder
+    // desfazer exatamente essa mudança se a action falhar — sem isso, um
+    // erro de rede ou de RLS deixava o card "flutuando" numa coluna que o
+    // banco nunca reconheceu.
+    const previousStages = stages;
+
+    const currentStage = previousStages.find((s) => s.leads.some((l) => l.id === leadId));
     if (!currentStage || currentStage.id === newStageId) return;
 
     const lead = currentStage.leads.find((l) => l.id === leadId)!;
+
+    setError(null);
 
     // Atualização otimista: move o card na hora, sem esperar o servidor.
     setStages((prev) =>
@@ -113,7 +122,17 @@ export function KanbanBoard({ initialStages }: { initialStages: KanbanStage[] })
       })
     );
 
-    changeLeadStageAction(leadId, newStageId);
+    try {
+      const result = await changeLeadStageAction(leadId, newStageId);
+      if (result?.error) {
+        setStages(previousStages);
+        setError(result.error);
+      }
+    } catch {
+      // Erro de rede/exceção inesperada — mesmo tratamento: desfaz e avisa.
+      setStages(previousStages);
+      setError("Não foi possível mover o lead. Tente novamente.");
+    }
   }
 
   if (stages.length === 0) {
@@ -125,12 +144,27 @@ export function KanbanBoard({ initialStages }: { initialStages: KanbanStage[] })
   }
 
   return (
-    <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
-      <div className="flex gap-4 overflow-x-auto pb-4">
-        {stages.map((stage) => (
-          <KanbanColumn key={stage.id} stage={stage} />
-        ))}
-      </div>
-    </DndContext>
+    <div>
+      {error && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            className="ml-3 shrink-0 text-red-400 hover:text-red-600"
+            aria-label="Fechar aviso"
+          >
+            ×
+          </button>
+        </div>
+      )}
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+        <div className="flex gap-4 overflow-x-auto pb-4">
+          {stages.map((stage) => (
+            <KanbanColumn key={stage.id} stage={stage} />
+          ))}
+        </div>
+      </DndContext>
+    </div>
   );
 }

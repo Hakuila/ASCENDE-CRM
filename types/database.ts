@@ -677,6 +677,10 @@ export type Database = {
           provider: Database["public"]["Enums"]["integration_provider"];
           is_active: boolean;
           config: Json;
+          // P0-07: referência ao segredo no Supabase Vault — nunca o valor
+          // em texto puro. Ver funções set_integration_secret /
+          // get_integration_secret.
+          access_token_secret_id: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -686,6 +690,7 @@ export type Database = {
           provider: Database["public"]["Enums"]["integration_provider"];
           is_active?: boolean;
           config?: Json;
+          access_token_secret_id?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -695,6 +700,7 @@ export type Database = {
           provider?: Database["public"]["Enums"]["integration_provider"];
           is_active?: boolean;
           config?: Json;
+          access_token_secret_id?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -753,6 +759,26 @@ export type Database = {
           }
         ];
       };
+      // P1-02: contadores de rate limiting — só acessada via as funções
+      // check_rate_limit/cleanup_rate_limit_hits, nunca diretamente.
+      rate_limit_hits: {
+        Row: {
+          key: string;
+          window_start: string;
+          count: number;
+        };
+        Insert: {
+          key: string;
+          window_start: string;
+          count?: number;
+        };
+        Update: {
+          key?: string;
+          window_start?: string;
+          count?: number;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -784,6 +810,27 @@ export type Database = {
       // P0-01 — troca a etapa de posição com a adjacente (up/down).
       reorder_pipeline_stage: {
         Args: { p_stage_id: string; p_direction: string };
+        Returns: undefined;
+      };
+      // P0-07 — grava/rotaciona um segredo de integração no Vault.
+      // Executável por authenticated (a própria função checa is_org_admin).
+      set_integration_secret: {
+        Args: { p_organization_id: string; p_provider: string; p_secret: string };
+        Returns: undefined;
+      };
+      // P0-07 — decifra um segredo de integração. Só service_role.
+      get_integration_secret: {
+        Args: { p_organization_id: string; p_provider: string };
+        Returns: string | null;
+      };
+      // P1-02 — incrementa e checa um contador de rate limit. Só service_role.
+      check_rate_limit: {
+        Args: { p_key: string; p_window_seconds: number; p_max_requests: number };
+        Returns: Json;
+      };
+      // P1-02 — poda contadores de rate limit antigos. Só service_role.
+      cleanup_rate_limit_hits: {
+        Args: Record<PropertyKey, never>;
         Returns: undefined;
       };
     };
