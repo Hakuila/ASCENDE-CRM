@@ -36,8 +36,8 @@ export default async function EditarTarefaPage({ params }: { params: { id: strin
             description: task.description,
             dueDate: task.due_date,
             priority: task.priority,
-            assignedTo: (task.assignee as any)?.id,
-            leadId: (task.lead as any)?.id,
+            assignedTo: task.assignee?.id,
+            leadId: task.lead?.id,
           }}
           submitLabel="Salvar alterações"
         />

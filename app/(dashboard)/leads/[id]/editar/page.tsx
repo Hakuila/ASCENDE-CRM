@@ -52,8 +52,8 @@ export default async function EditarLeadPage({ params }: { params: { id: string 
             notes: lead.notes,
             ownerId: lead.owner?.id,
             stageId: lead.stage?.id,
-            companyId: (lead as any).company_id,
-            campaignId: (lead as any).campaign_id,
+            companyId: lead.company_id,
+            campaignId: lead.campaign_id,
           }}
           submitLabel="Salvar alterações"
         />

@@ -47,7 +47,7 @@ export default async function TasksPage({
       </div>
 
       <div className="mt-4">
-        <TasksList tasks={tasks as any} />
+        <TasksList tasks={tasks} />
       </div>
     </div>
   );

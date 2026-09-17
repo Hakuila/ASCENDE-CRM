@@ -75,7 +75,7 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
         <div className="space-y-6 lg:col-span-2">
           <div className="rounded-xl border border-gray-100 bg-white p-5">
             <h2 className="mb-4 text-sm font-semibold text-gray-700">Histórico</h2>
-            <LeadActivityTimeline leadId={lead.id} activities={activities as any} />
+            <LeadActivityTimeline leadId={lead.id} activities={activities} />
           </div>
         </div>
 
@@ -85,7 +85,7 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
             <StageSelect leadId={lead.id} currentStageId={lead.stage?.id ?? null} stages={stages} />
           </div>
 
-          <LeadDealCard leadId={lead.id} deal={deal as any} />
+          <LeadDealCard leadId={lead.id} deal={deal} />
 
           <div className="rounded-xl border border-gray-100 bg-white p-5">
             <h2 className="mb-3 text-sm font-semibold text-gray-700">Contato</h2>

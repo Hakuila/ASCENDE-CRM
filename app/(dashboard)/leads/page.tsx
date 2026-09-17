@@ -57,7 +57,7 @@ export default async function LeadsPage({
       </div>
 
       <div className="mt-4">
-        <LeadsTable leads={leads as any} />
+        <LeadsTable leads={leads} />
       </div>
 
       <Pagination page={page} totalPages={totalPages} buildHref={buildHref} />

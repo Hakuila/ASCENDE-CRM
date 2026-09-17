@@ -1,8 +1,14 @@
 import "server-only";
 import { createClient } from "@/lib/supabase/server";
-import { createServiceRoleClient } from "@/lib/supabase/server";
+import { createServiceRoleClient } from "@/lib/supabase/admin";
 
-export type MetaConfig = { page_id?: string; page_access_token?: string };
+/**
+ * P0-07: page_access_token não vive mais aqui — foi movido para o Supabase
+ * Vault (ver access_token_secret_id na tabela integrations e as funções
+ * set_integration_secret/get_integration_secret). config só guarda
+ * metadados não sensíveis.
+ */
+export type MetaConfig = { page_id?: string };
 
 export async function getMetaIntegration(organizationId: string) {
   const supabase = createClient();
@@ -41,3 +47,4 @@ export async function findOrganizationByMetaPageId(pageId: string) {
     .maybeSingle();
   return data as { organization_id: string; is_active: boolean; config: MetaConfig } | null;
 }
+

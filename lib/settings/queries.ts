@@ -31,8 +31,12 @@ export async function getTeamMembers(organizationId: string): Promise<TeamMember
     .map((m) => ({
       membershipId: m.id,
       userId: m.user_id,
-      name: (m.profile as any).name,
-      email: (m.profile as any).email,
+      // Non-null: já filtramos as linhas sem profile na linha acima —
+      // com o Database real (P0-06), o embed tipa como objeto único
+      // (nunca array) para este relacionamento, então só falta o
+      // null-check que o .filter() não propaga automaticamente pro TS.
+      name: m.profile!.name,
+      email: m.profile!.email,
       role: m.role as TeamMember["role"],
     }));
 }

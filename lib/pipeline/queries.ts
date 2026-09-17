@@ -47,6 +47,6 @@ export async function getKanbanBoard(organizationId: string): Promise<KanbanStag
     ...stage,
     leads: (leads ?? [])
       .filter((l) => l.stage_id === stage.id)
-      .map((l) => ({ id: l.id, name: l.name, value: l.value, owner: l.owner as any })),
+      .map((l) => ({ id: l.id, name: l.name, value: l.value, owner: l.owner })),
   }));
 }

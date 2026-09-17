@@ -19,8 +19,10 @@ export async function getOrgMembers(organizationId: string): Promise<OrgMember[]
   return (data ?? [])
     .filter((m) => m.profile)
     .map((m) => ({
-      id: (m.profile as any).id,
-      name: (m.profile as any).name,
+      // Non-null: já filtramos as linhas sem profile acima — ver mesma
+      // observação em lib/settings/queries.ts::getTeamMembers.
+      id: m.profile!.id,
+      name: m.profile!.name,
       role: m.role as OrgMember["role"],
     }));
 }

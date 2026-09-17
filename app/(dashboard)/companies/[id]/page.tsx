@@ -49,7 +49,7 @@ export default async function CompanyDetailPage({ params }: { params: { id: stri
                       {lead.name}
                     </Link>
                     {lead.stage && (
-                      <Badge tone={stageTone((lead.stage as any).kind)}>{(lead.stage as any).name}</Badge>
+                      <Badge tone={stageTone(lead.stage.kind)}>{lead.stage.name}</Badge>
                     )}
                   </li>
                 ))}
