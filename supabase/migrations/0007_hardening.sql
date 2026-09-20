@@ -612,3 +612,241 @@ comment on function public.cleanup_rate_limit_hits() is
 
 revoke all on function public.cleanup_rate_limit_hits() from public, authenticated, anon;
 grant execute on function public.cleanup_rate_limit_hits() to service_role;
+
+-- ============================================================================
+-- P2-01: Audit logs — histórico de alterações administrativas
+--
+-- Separado de `activities` de propósito: activities é histórico
+-- OPERACIONAL do funil (lead criado, nota, venda) e já é visível pro
+-- usuário na timeline do lead. audit_logs é histórico ADMINISTRATIVO —
+-- mudanças de configuração da organização, equipe, pipeline e integrações
+-- — pensado pra investigação ("quem mudou isso e quando"), não pra UI de
+-- funil.
+--
+-- Guardamos before/after como jsonb para poder reconstruir o que mudou
+-- sem precisar de uma coluna por campo.
+-- ============================================================================
+
+create table public.audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid references public.organizations(id) on delete cascade,
+  actor_id uuid references auth.users(id) on delete set null,
+  action text not null,
+  entity_type text not null,
+  entity_id uuid,
+  before jsonb,
+  after jsonb,
+  created_at timestamptz not null default now()
+);
+
+comment on table public.audit_logs is
+  'P2-01: histórico de alterações ADMINISTRATIVAS (organização, equipe, '
+  'pipeline, integrações, provisionamento) — não confundir com activities, '
+  'que é o histórico operacional do funil visível na timeline do lead.';
+comment on column public.audit_logs.organization_id is
+  'Null para ações que não pertencem a uma organização específica (ex.: '
+  'gestão de staff da agência).';
+comment on column public.audit_logs.actor_id is
+  'Null quando a ação não teve um usuário autenticado por trás (ex.: um '
+  'job de sistema).';
+
+create index idx_audit_logs_org_created on public.audit_logs(organization_id, created_at desc);
+create index idx_audit_logs_entity on public.audit_logs(entity_type, entity_id);
+create index idx_audit_logs_actor on public.audit_logs(actor_id);
+
+alter table public.audit_logs enable row level security;
+
+-- Leitura: admin da própria organização vê os logs dela; platform_admin
+-- vê tudo (inclusive ações sem organization_id, como gestão de staff).
+create policy audit_logs_select on public.audit_logs
+  for select
+  using (
+    public.is_platform_admin(auth.uid())
+    or (organization_id is not null and public.is_org_admin(organization_id, auth.uid()))
+  );
+
+-- Sem policies de insert/update/delete: a única forma de escrever é via
+-- log_audit_event() abaixo. Trilha de auditoria que pudesse ser editada
+-- pelo próprio client não serviria pra nada.
+
+create or replace function public.log_audit_event(
+  p_organization_id uuid,
+  p_action text,
+  p_entity_type text,
+  p_entity_id uuid,
+  p_before jsonb,
+  p_after jsonb
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Impede que um usuário autenticado forje entradas de auditoria para
+  -- uma organização que não é a dele (poluir/falsificar a trilha de outra
+  -- empresa). platform_admin pode registrar para qualquer organização
+  -- (ex.: ações feitas em nome do cliente a partir do agency-dashboard).
+  -- Entradas SEM organização (staff da agência) são restritas a
+  -- platform_admin também — não há motivo legítimo para um usuário comum
+  -- gravar uma entrada de auditoria "solta".
+  if p_organization_id is null then
+    if not public.is_platform_admin(auth.uid()) then
+      raise exception 'Sem permissão para registrar esta auditoria.';
+    end if;
+  elsif not public.is_platform_admin(auth.uid())
+     and not public.has_org_access(p_organization_id, auth.uid())
+  then
+    raise exception 'Sem permissão para registrar auditoria nesta organização.';
+  end if;
+
+  insert into public.audit_logs (organization_id, actor_id, action, entity_type, entity_id, before, after)
+  values (p_organization_id, auth.uid(), p_action, p_entity_type, p_entity_id, p_before, p_after);
+end;
+$$;
+
+comment on function public.log_audit_event(uuid, text, text, uuid, jsonb, jsonb) is
+  'P2-01: único caminho de escrita em audit_logs. actor_id vem de '
+  'auth.uid() (não de um parâmetro) para não poder ser forjado por quem '
+  'chama.';
+
+revoke all on function public.log_audit_event(uuid, text, text, uuid, jsonb, jsonb) from public;
+grant execute on function public.log_audit_event(uuid, text, text, uuid, jsonb, jsonb) to authenticated, service_role;
+
+-- ============================================================================
+-- P2-02: soft delete em Leads, Companies e Deals
+--
+-- Excluir um Lead/Company/Deal hoje é definitivo (DELETE físico) — sem
+-- like de recuperação em caso de engano, e sem rastro pra auditoria (P2-01)
+-- de "isso existiu e foi removido". Substituímos por soft delete: a linha
+-- continua no banco com deleted_at preenchido, e as policies de SELECT
+-- passam a escondê-la de qualquer leitura normal.
+--
+-- Companies e Deals ainda não bloqueiam remoção de registros com Leads
+-- vinculados de forma que precise de tratamento especial aqui — leads.
+-- company_id/deals.lead_id continuam apontando pro id original; como a
+-- linha "deletada" fica invisível via RLS, qualquer embed
+-- (company:companies(...), etc.) que apontar pra ela simplesmente some do
+-- resultado (PostgREST aplica RLS também a relações embutidas) em vez de
+-- quebrar.
+-- ============================================================================
+
+alter table public.leads add column if not exists deleted_at timestamptz;
+alter table public.companies add column if not exists deleted_at timestamptz;
+alter table public.deals add column if not exists deleted_at timestamptz;
+
+comment on column public.leads.deleted_at is
+  'P2-02: soft delete. Null = ativo. As policies de SELECT/UPDATE já '
+  'escondem linhas com deleted_at preenchido — não filtre manualmente nas '
+  'queries.';
+comment on column public.companies.deleted_at is 'P2-02: soft delete — ver leads.deleted_at.';
+comment on column public.deals.deleted_at is 'P2-02: soft delete — ver leads.deleted_at.';
+
+-- Índices parciais: acelera as queries do dia a dia (que só olham linhas
+-- ativas) sem pagar o custo de indexar linhas soft-deletadas.
+create index idx_leads_org_active on public.leads(organization_id) where deleted_at is null;
+create index idx_companies_org_active on public.companies(organization_id) where deleted_at is null;
+create index idx_deals_org_active on public.deals(organization_id) where deleted_at is null;
+
+-- Reescreve as policies de SELECT/UPDATE geradas pelo template do 0001
+-- para as 3 tabelas, acrescentando "deleted_at is null". A policy de
+-- DELETE físico é mantida (is_org_admin) como via de escape manual — a
+-- aplicação não usa mais DELETE direto para essas 3 tabelas, só UPDATE
+-- setando deleted_at.
+
+drop policy if exists leads_select on public.leads;
+create policy leads_select on public.leads
+  for select using (has_org_access(organization_id, auth.uid()) and deleted_at is null);
+
+drop policy if exists leads_update on public.leads;
+create policy leads_update on public.leads
+  for update
+  using (has_org_access(organization_id, auth.uid()) and deleted_at is null)
+  with check (has_org_access(organization_id, auth.uid()));
+
+drop policy if exists companies_select on public.companies;
+create policy companies_select on public.companies
+  for select using (has_org_access(organization_id, auth.uid()) and deleted_at is null);
+
+drop policy if exists companies_update on public.companies;
+create policy companies_update on public.companies
+  for update
+  using (has_org_access(organization_id, auth.uid()) and deleted_at is null)
+  with check (has_org_access(organization_id, auth.uid()));
+
+drop policy if exists deals_select on public.deals;
+create policy deals_select on public.deals
+  for select using (has_org_access(organization_id, auth.uid()) and deleted_at is null);
+
+drop policy if exists deals_update on public.deals;
+create policy deals_update on public.deals
+  for update
+  using (has_org_access(organization_id, auth.uid()) and deleted_at is null)
+  with check (has_org_access(organization_id, auth.uid()));
+
+-- Nota: a policy de UPDATE usa "deleted_at is null" só no USING (estado
+-- ANTES do update) — não no WITH CHECK (estado DEPOIS). Isso permite a
+-- própria ação de soft-delete (que muda deleted_at de null pra now())
+-- acontecer, mas bloqueia qualquer edição posterior de uma linha já
+-- deletada — restaurar exigiria um caminho dedicado (fora do escopo
+-- deste item), não uma edição comum.
+
+-- ============================================================================
+-- P2-03: histórico de etapas do Lead (lead_stage_history)
+--
+-- activities tem uma entrada de texto livre ("Movido para X") — boa pra
+-- exibir na timeline, ruim pra calcular métricas (tempo médio em cada
+-- etapa, taxa de conversão etapa-a-etapa). lead_stage_history guarda
+-- from/to estruturado, pensado para esse tipo de análise.
+--
+-- Tabela append-only por design: sem policy de UPDATE/DELETE para o
+-- client — só INSERT. Corrigir um registro errado é inserir uma nova
+-- linha corretiva, não editar o histórico.
+-- ============================================================================
+
+create table public.lead_stage_history (
+  id uuid primary key default gen_random_uuid(),
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  lead_id uuid not null references public.leads(id) on delete cascade,
+  from_stage_id uuid references public.pipeline_stages(id) on delete set null,
+  to_stage_id uuid references public.pipeline_stages(id) on delete set null,
+  changed_by uuid references auth.users(id) on delete set null,
+  changed_at timestamptz not null default now()
+);
+
+comment on table public.lead_stage_history is
+  'P2-03: histórico estruturado de mudanças de etapa, para métricas '
+  '(tempo médio por etapa, conversão etapa-a-etapa). from_stage_id null '
+  '= entrada inicial do lead no pipeline. changed_by null = mudança '
+  'automática sem usuário por trás (ex.: webhook do Meta criando o lead).';
+
+create index idx_lead_stage_history_lead on public.lead_stage_history(lead_id, changed_at);
+create index idx_lead_stage_history_org on public.lead_stage_history(organization_id, changed_at);
+
+alter table public.lead_stage_history enable row level security;
+
+create policy lead_stage_history_select on public.lead_stage_history
+  for select using (has_org_access(organization_id, auth.uid()));
+
+create policy lead_stage_history_insert on public.lead_stage_history
+  for insert with check (has_org_access(organization_id, auth.uid()));
+
+-- Sem policy de update/delete — ver comentário da tabela acima. A
+-- service_role (webhooks) ignora RLS normalmente, então continua podendo
+-- inserir.
+
+-- P0-05: mesma integridade cross-tenant aplicada às outras tabelas.
+create trigger trg_lead_stage_history_lead_same_org
+  before insert or update of lead_id, organization_id on public.lead_stage_history
+  for each row execute function public.enforce_same_organization('leads', 'lead_id');
+
+create trigger trg_lead_stage_history_from_stage_same_org
+  before insert or update of from_stage_id, organization_id on public.lead_stage_history
+  for each row execute function public.enforce_same_organization('pipeline_stages', 'from_stage_id');
+
+create trigger trg_lead_stage_history_to_stage_same_org
+  before insert or update of to_stage_id, organization_id on public.lead_stage_history
+  for each row execute function public.enforce_same_organization('pipeline_stages', 'to_stage_id');
+
+create trigger trg_lead_stage_history_changed_by_same_org
+  before insert or update of changed_by, organization_id on public.lead_stage_history
+  for each row execute function public.enforce_org_membership('changed_by');

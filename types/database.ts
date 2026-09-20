@@ -146,6 +146,7 @@ export type Database = {
           notes: string | null;
           created_at: string;
           updated_at: string;
+          deleted_at: string | null;
         };
         Insert: {
           id?: string;
@@ -158,6 +159,7 @@ export type Database = {
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Update: {
           id?: string;
@@ -170,6 +172,7 @@ export type Database = {
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Relationships: [
           {
@@ -368,6 +371,7 @@ export type Database = {
           external_lead_id: string | null;
           created_at: string;
           updated_at: string;
+          deleted_at: string | null;
         };
         Insert: {
           id?: string;
@@ -396,6 +400,7 @@ export type Database = {
           external_lead_id?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Update: {
           id?: string;
@@ -424,6 +429,7 @@ export type Database = {
           external_lead_id?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Relationships: [
           {
@@ -485,6 +491,7 @@ export type Database = {
           closed_at: string | null;
           created_at: string;
           updated_at: string;
+          deleted_at: string | null;
         };
         Insert: {
           id?: string;
@@ -500,6 +507,7 @@ export type Database = {
           closed_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Update: {
           id?: string;
@@ -515,6 +523,7 @@ export type Database = {
           closed_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          deleted_at?: string | null;
         };
         Relationships: [
           {
@@ -779,6 +788,127 @@ export type Database = {
         };
         Relationships: [];
       };
+      // P2-01: histórico de alterações administrativas — só acessada via
+      // a função log_audit_event, nunca por insert direto do client.
+      audit_logs: {
+        Row: {
+          id: string;
+          organization_id: string | null;
+          actor_id: string | null;
+          action: string;
+          entity_type: string;
+          entity_id: string | null;
+          before: Json | null;
+          after: Json | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id?: string | null;
+          actor_id?: string | null;
+          action: string;
+          entity_type: string;
+          entity_id?: string | null;
+          before?: Json | null;
+          after?: Json | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string | null;
+          actor_id?: string | null;
+          action?: string;
+          entity_type?: string;
+          entity_id?: string | null;
+          before?: Json | null;
+          after?: Json | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "audit_logs_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "audit_logs_actor_id_fkey";
+            columns: ["actor_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
+      // P2-03: histórico estruturado de mudanças de etapa (from/to),
+      // pensado pra métricas — não confundir com activities.
+      lead_stage_history: {
+        Row: {
+          id: string;
+          organization_id: string;
+          lead_id: string;
+          from_stage_id: string | null;
+          to_stage_id: string | null;
+          changed_by: string | null;
+          changed_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id: string;
+          lead_id: string;
+          from_stage_id?: string | null;
+          to_stage_id?: string | null;
+          changed_by?: string | null;
+          changed_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string;
+          lead_id?: string;
+          from_stage_id?: string | null;
+          to_stage_id?: string | null;
+          changed_by?: string | null;
+          changed_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "lead_stage_history_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "lead_stage_history_lead_id_fkey";
+            columns: ["lead_id"];
+            isOneToOne: false;
+            referencedRelation: "leads";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "lead_stage_history_from_stage_id_fkey";
+            columns: ["from_stage_id"];
+            isOneToOne: false;
+            referencedRelation: "pipeline_stages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "lead_stage_history_to_stage_id_fkey";
+            columns: ["to_stage_id"];
+            isOneToOne: false;
+            referencedRelation: "pipeline_stages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "lead_stage_history_changed_by_fkey";
+            columns: ["changed_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -831,6 +961,19 @@ export type Database = {
       // P1-02 — poda contadores de rate limit antigos. Só service_role.
       cleanup_rate_limit_hits: {
         Args: Record<PropertyKey, never>;
+        Returns: undefined;
+      };
+      // P2-01 — grava uma entrada de audit_logs. actor_id vem de auth.uid()
+      // internamente, não é um argumento.
+      log_audit_event: {
+        Args: {
+          p_organization_id: string | null;
+          p_action: string;
+          p_entity_type: string;
+          p_entity_id: string | null;
+          p_before: Json | null;
+          p_after: Json | null;
+        };
         Returns: undefined;
       };
     };

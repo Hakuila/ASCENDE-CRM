@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { logLeadStageChange } from "@/lib/leads/history";
 
 /**
  * POST /api/leads/capture
@@ -172,6 +173,16 @@ export async function POST(request: NextRequest) {
       lead_id: lead.id,
       type: "created",
       description: `Lead recebido via API pública${leadFields.utm_source ? ` (${leadFields.utm_source})` : ""}.`,
+    });
+
+    // P2-03: entrada inicial no histórico de etapas. changedBy null — a
+    // API pública não tem usuário autenticado por trás.
+    await logLeadStageChange(supabase, {
+      organizationId: org.id,
+      leadId: lead.id,
+      fromStageId: null,
+      toStageId: stageId,
+      changedBy: null,
     });
   }
 

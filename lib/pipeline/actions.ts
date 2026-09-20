@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/auth/get-session";
 import { canManagePipelineSettings } from "@/lib/permissions";
 import { stageSchema } from "@/lib/validations/pipeline";
+import { logAuditEvent } from "@/lib/audit/log";
 
 export type StageFormState = { error?: string } | null;
 
@@ -72,15 +73,27 @@ export async function createStageAction(
     .limit(1)
     .maybeSingle();
 
-  const { error } = await supabase.from("pipeline_stages").insert({
-    organization_id: organizationId,
-    pipeline_id: pipelineId,
-    name: parsed.data.name,
-    kind: parsed.data.kind,
-    order_index: (last?.order_index ?? 0) + 1,
-  });
+  const { data: created, error } = await supabase
+    .from("pipeline_stages")
+    .insert({
+      organization_id: organizationId,
+      pipeline_id: pipelineId,
+      name: parsed.data.name,
+      kind: parsed.data.kind,
+      order_index: (last?.order_index ?? 0) + 1,
+    })
+    .select("id")
+    .single();
 
-  if (error) return { error: "Não foi possível criar a etapa." };
+  if (error || !created) return { error: "Não foi possível criar a etapa." };
+
+  await logAuditEvent({
+    organizationId,
+    action: "pipeline_stage.created",
+    entityType: "pipeline_stage",
+    entityId: created.id,
+    after: { name: parsed.data.name, kind: parsed.data.kind },
+  });
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");
@@ -106,12 +119,28 @@ export async function updateStageAction(
   if (!stage) return { error: "Etapa não encontrada." };
 
   const supabase = createClient();
+
+  const { data: before } = await supabase
+    .from("pipeline_stages")
+    .select("name, kind")
+    .eq("id", stageId)
+    .maybeSingle();
+
   const { error } = await supabase
     .from("pipeline_stages")
     .update({ name: parsed.data.name, kind: parsed.data.kind })
     .eq("id", stageId);
 
   if (error) return { error: "Não foi possível salvar a etapa." };
+
+  await logAuditEvent({
+    organizationId,
+    action: "pipeline_stage.updated",
+    entityType: "pipeline_stage",
+    entityId: stageId,
+    before,
+    after: { name: parsed.data.name, kind: parsed.data.kind },
+  });
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");
@@ -141,6 +170,12 @@ export async function deleteStageAction(stageId: string): Promise<StageFormState
 
   const supabase = createClient();
 
+  const { data: stageDetails } = await supabase
+    .from("pipeline_stages")
+    .select("name, kind")
+    .eq("id", stageId)
+    .maybeSingle();
+
   const [{ count: leadsCount, error: leadsError }, { count: dealsCount, error: dealsError }] =
     await Promise.all([
       supabase
@@ -166,6 +201,14 @@ export async function deleteStageAction(stageId: string): Promise<StageFormState
 
   const { error } = await supabase.from("pipeline_stages").delete().eq("id", stageId);
   if (error) return { error: "Não foi possível excluir a etapa." };
+
+  await logAuditEvent({
+    organizationId,
+    action: "pipeline_stage.deleted",
+    entityType: "pipeline_stage",
+    entityId: stageId,
+    before: stageDetails,
+  });
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");
@@ -195,6 +238,14 @@ export async function reorderStageAction(
   });
 
   if (error) return { error: "Não foi possível reordenar as etapas." };
+
+  await logAuditEvent({
+    organizationId,
+    action: "pipeline_stage.reordered",
+    entityType: "pipeline_stage",
+    entityId: stageId,
+    after: { direction },
+  });
 
   revalidatePath("/pipeline/etapas");
   revalidatePath("/pipeline");

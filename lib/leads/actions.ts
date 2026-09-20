@@ -7,6 +7,7 @@ import { getSession } from "@/lib/auth/get-session";
 import { leadSchema } from "@/lib/validations/leads";
 import { canDeleteLead } from "@/lib/permissions";
 import { getDefaultPipelineStages } from "@/lib/leads/queries";
+import { logLeadStageChange } from "@/lib/leads/history";
 
 export type LeadFormState = { error?: string } | null;
 
@@ -142,6 +143,16 @@ export async function createLeadAction(
     console.error("Falha ao registrar activity de criação de Lead:", activityError);
   }
 
+  // P2-03: entrada inicial no histórico de etapas (from_stage_id null =
+  // "entrou no pipeline aqui").
+  await logLeadStageChange(supabase, {
+    organizationId,
+    leadId: lead.id,
+    fromStageId: null,
+    toStageId: finalStageId,
+    changedBy: session.userId,
+  });
+
   revalidatePath("/leads");
   redirect(`/leads/${lead.id}`);
 }
@@ -181,6 +192,13 @@ export async function updateLeadAction(
     }
   }
 
+  // P2-03: precisa da etapa ANTES do update para saber o "from" do histórico.
+  const { data: currentLead } = await supabase
+    .from("leads")
+    .select("stage_id")
+    .eq("id", leadId)
+    .maybeSingle();
+
   const { error } = await supabase
     .from("leads")
     .update({
@@ -204,6 +222,14 @@ export async function updateLeadAction(
   if (error) {
     return { error: "Não foi possível salvar as alterações." };
   }
+
+  await logLeadStageChange(supabase, {
+    organizationId,
+    leadId,
+    fromStageId: currentLead?.stage_id ?? null,
+    toStageId: finalStageId,
+    changedBy: session.userId,
+  });
 
   revalidatePath(`/leads/${leadId}`);
   revalidatePath("/leads");
@@ -242,6 +268,13 @@ export async function changeLeadStageAction(
     return { error: "Etapa de destino não encontrada." };
   }
 
+  // P2-03: etapa ANTES do update, para o "from" do histórico.
+  const { data: currentLead } = await supabase
+    .from("leads")
+    .select("stage_id")
+    .eq("id", leadId)
+    .maybeSingle();
+
   const { error } = await supabase
     .from("leads")
     .update({ stage_id: newStageId })
@@ -263,6 +296,14 @@ export async function changeLeadStageAction(
     console.error("Falha ao registrar activity de mudança de etapa:", activityError);
   }
 
+  await logLeadStageChange(supabase, {
+    organizationId: session.organization.id,
+    leadId,
+    fromStageId: currentLead?.stage_id ?? null,
+    toStageId: newStageId,
+    changedBy: session.userId,
+  });
+
   revalidatePath(`/leads/${leadId}`);
   revalidatePath("/leads");
   return null;
@@ -271,6 +312,12 @@ export async function changeLeadStageAction(
 // ---------------------------------------------------------------------------
 // EXCLUIR LEAD (só client_admin / platform_admin — RLS também garante isso)
 // ---------------------------------------------------------------------------
+/**
+ * P2-02: soft delete — em vez de remover a linha, marca deleted_at. A
+ * policy de SELECT em leads já esconde linhas com deleted_at preenchido de
+ * qualquer leitura normal (ver migration 0007), então nenhuma query
+ * precisa filtrar isso manualmente.
+ */
 export async function deleteLeadAction(leadId: string) {
   const session = await getSession();
   if (!session) return;
@@ -280,7 +327,7 @@ export async function deleteLeadAction(leadId: string) {
   }
 
   const supabase = createClient();
-  await supabase.from("leads").delete().eq("id", leadId);
+  await supabase.from("leads").update({ deleted_at: new Date().toISOString() }).eq("id", leadId);
 
   revalidatePath("/leads");
   redirect("/leads");

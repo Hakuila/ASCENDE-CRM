@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/auth/get-session";
 import { dealSchema } from "@/lib/validations/deals";
+import { logLeadStageChange } from "@/lib/leads/history";
 
 export type DealFormState = { error?: string } | null;
 
@@ -176,6 +177,13 @@ export async function markDealStatusAction(
   }
 
   if (targetStageId) {
+    // P2-03: etapa do Lead ANTES da sincronização, para o "from" do histórico.
+    const { data: leadBefore } = await supabase
+      .from("leads")
+      .select("stage_id")
+      .eq("id", leadId)
+      .maybeSingle();
+
     const { error: updateLeadError } = await supabase
       .from("leads")
       .update({ stage_id: targetStageId })
@@ -190,6 +198,14 @@ export async function markDealStatusAction(
           "A oportunidade foi fechada, mas não foi possível mover o Lead para a etapa correspondente. Ajuste manualmente.",
       };
     }
+
+    await logLeadStageChange(supabase, {
+      organizationId,
+      leadId,
+      fromStageId: leadBefore?.stage_id ?? null,
+      toStageId: targetStageId,
+      changedBy: session.userId,
+    });
   }
 
   const { error: activityError } = await supabase.from("activities").insert({

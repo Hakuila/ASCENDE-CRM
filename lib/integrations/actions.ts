@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/auth/get-session";
 import { canManageIntegrations } from "@/lib/permissions";
 import { metaIntegrationSchema } from "@/lib/validations/integrations";
+import { logAuditEvent } from "@/lib/audit/log";
 
 export type IntegrationFormState = { error?: string; success?: boolean } | null;
 
@@ -68,6 +69,22 @@ export async function saveMetaIntegrationAction(
     };
   }
 
+  // Duas entradas separadas: a config (não sensível, pode ir com detalhe)
+  // e a rotação do segredo (NUNCA registra o valor do token em audit_logs
+  // — só o fato de que foi trocado).
+  await logAuditEvent({
+    organizationId,
+    action: "integration.updated",
+    entityType: "integration",
+    after: { provider: "meta_ads", page_id: parsed.data.pageId },
+  });
+  await logAuditEvent({
+    organizationId,
+    action: "integration.secret_rotated",
+    entityType: "integration",
+    after: { provider: "meta_ads" },
+  });
+
   revalidatePath("/integrations");
   return { success: true };
 }
@@ -83,6 +100,13 @@ export async function toggleMetaIntegrationAction(isActive: boolean) {
     .eq("organization_id", session.organization.id)
     .eq("provider", "meta_ads");
 
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "integration.toggled",
+    entityType: "integration",
+    after: { provider: "meta_ads", is_active: isActive },
+  });
+
   revalidatePath("/integrations");
 }
 
@@ -96,6 +120,16 @@ export async function regeneratePublicApiKeyAction() {
     .from("organizations")
     .update({ public_api_key: newKey })
     .eq("id", session.organization.id);
+
+  // Não registra o valor da chave — é uma credencial, e audit_logs pode
+  // ser lido por platform_admin em todas as organizações. Só o fato de
+  // que foi regenerada, e quando.
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "public_api_key.regenerated",
+    entityType: "organization",
+    entityId: session.organization.id,
+  });
 
   revalidatePath("/integrations");
 }

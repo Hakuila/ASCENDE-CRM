@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { getSession } from "@/lib/auth/get-session";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { inviteClientSchema } from "@/lib/validations/agency";
+import { logAuditEvent } from "@/lib/audit/log";
 
 export type InviteClientState =
   | { error: string; success?: undefined }
@@ -102,7 +103,7 @@ export async function inviteClientAction(
     return { error: traduzErroCriacao(createError?.message ?? "erro desconhecido") };
   }
 
-  const { error: rpcError } = await admin.rpc("create_organization_for_user", {
+  const { data: newOrgId, error: rpcError } = await admin.rpc("create_organization_for_user", {
     org_name: orgName,
     target_user_id: created.user.id,
   });
@@ -113,6 +114,17 @@ export async function inviteClientAction(
     const error = await rollbackCreatedUser(admin, created.user.id, adminEmail, rpcError.message);
     return { error };
   }
+
+  // organizationId aqui é a organização recém-criada (não a de quem está
+  // executando a ação — quem chama é platform_admin, sem organização
+  // própria), para o log aparecer no histórico do cliente provisionado.
+  await logAuditEvent({
+    organizationId: newOrgId ?? null,
+    action: "agency_client.provisioned",
+    entityType: "organization",
+    entityId: newOrgId ?? null,
+    after: { orgName, adminName, adminEmail },
+  });
 
   return { success: true, email: adminEmail, tempPassword };
 }
@@ -173,6 +185,14 @@ export async function createStaffAction(
     return { error };
   }
 
+  await logAuditEvent({
+    organizationId: null, // staff da agência não pertence a uma organização
+    action: "agency_staff.created",
+    entityType: "platform_admin",
+    entityId: created.user.id,
+    after: { name, email },
+  });
+
   return { success: true, email, tempPassword };
 }
 
@@ -183,5 +203,13 @@ export async function removeStaffAction(userId: string) {
 
   const admin = createServiceRoleClient();
   await admin.from("platform_admins").delete().eq("user_id", userId);
+
+  await logAuditEvent({
+    organizationId: null,
+    action: "agency_staff.removed",
+    entityType: "platform_admin",
+    entityId: userId,
+  });
+
   revalidatePath("/agency-dashboard/usuarios");
 }

@@ -95,6 +95,13 @@ export async function updateCompanyAction(
   redirect(`/companies/${companyId}`);
 }
 
+/**
+ * P2-02: soft delete — em vez de remover a linha, marca deleted_at. A
+ * policy de SELECT em companies já esconde linhas com deleted_at
+ * preenchido, então leads que referenciam essa empresa simplesmente param
+ * de ver o embed (sem quebrar) — não precisa de um cleanup manual de
+ * company_id.
+ */
 export async function deleteCompanyAction(companyId: string) {
   const session = await getSession();
   if (!session) return;
@@ -103,8 +110,10 @@ export async function deleteCompanyAction(companyId: string) {
   }
 
   const supabase = createClient();
-  // leads dessa empresa ficam com company_id = null (ON DELETE SET NULL).
-  await supabase.from("companies").delete().eq("id", companyId);
+  await supabase
+    .from("companies")
+    .update({ deleted_at: new Date().toISOString() })
+    .eq("id", companyId);
 
   revalidatePath("/companies");
   redirect("/companies");

@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { canManageOrgUsers, isOrgAdmin } from "@/lib/permissions";
 import { organizationProfileSchema, inviteTeamMemberSchema } from "@/lib/validations/settings";
+import { logAuditEvent } from "@/lib/audit/log";
 
 export type SettingsFormState = { error?: string; success?: string } | null;
 export type InviteMemberState =
@@ -56,17 +57,35 @@ export async function updateOrganizationAction(
   }
 
   const supabase = createClient();
+
+  const { data: before } = await supabase
+    .from("organizations")
+    .select("name, legal_name, cnpj, logo_url")
+    .eq("id", session.organization.id)
+    .maybeSingle();
+
+  const after = {
+    name: parsed.data.name,
+    legal_name: toNullable(parsed.data.legalName),
+    cnpj: toNullable(parsed.data.cnpj),
+    logo_url: toNullable(parsed.data.logoUrl),
+  };
+
   const { error } = await supabase
     .from("organizations")
-    .update({
-      name: parsed.data.name,
-      legal_name: toNullable(parsed.data.legalName),
-      cnpj: toNullable(parsed.data.cnpj),
-      logo_url: toNullable(parsed.data.logoUrl),
-    })
+    .update(after)
     .eq("id", session.organization.id);
 
   if (error) return { error: "Não foi possível salvar. Tente novamente." };
+
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "organization.updated",
+    entityType: "organization",
+    entityId: session.organization.id,
+    before,
+    after,
+  });
 
   revalidatePath("/settings");
   return { success: "Dados da empresa atualizados." };
@@ -121,11 +140,15 @@ export async function inviteTeamMemberAction(
     return { error: `Não foi possível criar a conta: ${createError?.message ?? "erro desconhecido"}` };
   }
 
-  const { error: membershipError } = await admin.from("memberships").insert({
-    organization_id: session.organization.id,
-    user_id: created.user.id,
-    role,
-  });
+  const { data: newMembership, error: membershipError } = await admin
+    .from("memberships")
+    .insert({
+      organization_id: session.organization.id,
+      user_id: created.user.id,
+      role,
+    })
+    .select("id")
+    .single();
 
   if (membershipError) {
     // Rollback: desfaz a criação do usuário no Auth para não deixar órfão.
@@ -147,6 +170,14 @@ export async function inviteTeamMemberAction(
     return { error: `Não foi possível adicionar "${email}" à equipe. Tente novamente.` };
   }
 
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "membership.invited",
+    entityType: "membership",
+    entityId: newMembership.id,
+    after: { email, role },
+  });
+
   revalidatePath("/settings");
   return { success: true, email, tempPassword };
 }
@@ -163,6 +194,12 @@ export async function updateMemberRoleAction(
 
   const supabase = createClient();
 
+  const { data: current } = await supabase
+    .from("memberships")
+    .select("role")
+    .eq("id", membershipId)
+    .maybeSingle();
+
   // Não deixa remover o último admin da organização.
   if (role === "salesperson") {
     const { count } = await supabase
@@ -170,17 +207,22 @@ export async function updateMemberRoleAction(
       .select("id", { count: "exact", head: true })
       .eq("organization_id", session.organization.id)
       .eq("role", "client_admin");
-    const { data: current } = await supabase
-      .from("memberships")
-      .select("role")
-      .eq("id", membershipId)
-      .maybeSingle();
     if (current?.role === "client_admin" && (count ?? 0) <= 1) {
       return; // silenciosamente ignora — a UI já avisa antes de chamar
     }
   }
 
   await supabase.from("memberships").update({ role }).eq("id", membershipId);
+
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "membership.role_changed",
+    entityType: "membership",
+    entityId: membershipId,
+    before: { role: current?.role ?? null },
+    after: { role },
+  });
+
   revalidatePath("/settings");
 }
 
@@ -211,5 +253,14 @@ export async function removeMemberAction(membershipId: string) {
   }
 
   await supabase.from("memberships").delete().eq("id", membershipId);
+
+  await logAuditEvent({
+    organizationId: session.organization.id,
+    action: "membership.removed",
+    entityType: "membership",
+    entityId: membershipId,
+    before: { user_id: target?.user_id ?? null, role: target?.role ?? null },
+  });
+
   revalidatePath("/settings");
 }

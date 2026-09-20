@@ -4,6 +4,7 @@ import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { findOrganizationByMetaPageId } from "@/lib/integrations/queries";
 import { fetchMetaLeadData, extractField } from "@/lib/integrations/meta";
+import { logLeadStageChange } from "@/lib/leads/history";
 
 /**
  * GET — handshake de verificação do webhook.
@@ -191,6 +192,16 @@ async function processLeadgenEvent(
     lead_id: lead.id,
     type: "created",
     description: "Lead recebido via Meta Lead Ads.",
+  });
+
+  // P2-03: entrada inicial no histórico de etapas. changedBy null — não há
+  // usuário autenticado por trás de um webhook.
+  await logLeadStageChange(supabase, {
+    organizationId: org.organization_id,
+    leadId: lead.id,
+    fromStageId: null,
+    toStageId: pipelineStageInfo.stage_id,
+    changedBy: null,
   });
 
   // Notifica os admins da organização (não há "responsável" atribuído
