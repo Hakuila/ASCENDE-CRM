@@ -390,7 +390,7 @@ begin
 
   select access_token_secret_id into v_existing_secret_id
   from public.integrations
-  where organization_id = p_organization_id and provider = p_provider::integration_provider;
+  where organization_id = p_organization_id and provider = p_provider;
 
   if not found then
     raise exception 'Integração % não encontrada para esta organização. Salve a configuração antes de definir o token.', p_provider;
@@ -407,7 +407,7 @@ begin
     );
     update public.integrations
       set access_token_secret_id = v_new_secret_id
-      where organization_id = p_organization_id and provider = p_provider::integration_provider;
+      where organization_id = p_organization_id and provider = p_provider;
   end if;
 end;
 $$;
@@ -436,7 +436,7 @@ declare
 begin
   select access_token_secret_id into v_secret_id
   from public.integrations
-  where organization_id = p_organization_id and provider = p_provider::integration_provider;
+  where organization_id = p_organization_id and provider = p_provider;
 
   if v_secret_id is null then
     return null;
@@ -855,221 +855,3 @@ create trigger trg_lead_stage_history_to_stage_same_org
 create trigger trg_lead_stage_history_changed_by_same_org
   before insert or update of changed_by, organization_id on public.lead_stage_history
   for each row execute function public.enforce_org_membership('changed_by');
-
--- ============================================================================
--- Validação pós-auditoria — item 3.1: revogar create_organization_with_admin
---
--- Esta função (migration 0002) foi pensada para um fluxo de self-service
--- signup que não existe mais no produto (substituído por convite feito
--- pelo platform_admin, ver lib/agency/actions.ts::inviteClientAction). Ter
--- essa função ainda executável por qualquer `authenticated` permitiria que
--- um usuário comum criasse sua própria organização por fora do fluxo
--- oficial — desalinhado com o modelo atual, onde só o platform_admin
--- provisiona clientes.
---
--- Mantemos a função definida (não fazemos DROP) para não quebrar nada que
--- eventualmente ainda a chame diretamente via service_role/SQL, mas
--- ninguém mais consegue executá-la pela API.
--- ============================================================================
-
-revoke all on function public.create_organization_with_admin(text) from public, authenticated, anon;
-
-comment on function public.create_organization_with_admin(text) is
-  'DESATIVADA (ver migration 0007): fluxo de self-service signup não é '
-  'mais usado. Provisionamento de organização hoje é sempre via '
-  'create_organization_for_user, chamado pelo platform_admin através de '
-  'lib/agency/actions.ts com a service role.';
-
--- ----------------------------------------------------------------------------
--- Validação pós-auditoria — item 3.2: GRANT explícito para service_role
---
--- create_organization_for_user já estava revogada de public/authenticated
--- desde a migration 0004 — funcionalmente já era inacessível para eles.
--- Mas nunca houve um GRANT explícito para service_role: ela funcionava por
--- privilégio implícito (bypassrls do role), não por permissão declarada.
--- Tornamos isso explícito para não depender de comportamento implícito de
--- um role específico — clareza de intenção, sem mudança de comportamento.
--- ----------------------------------------------------------------------------
-
-grant execute on function public.create_organization_for_user(text, uuid) to service_role;
-
--- ============================================================================
--- Validação pós-auditoria — item 3.3: fechamento de Deal transacional
---
--- O fluxo anterior (markDealStatusAction) fazia, em chamadas SEPARADAS do
--- client: 1) update em deals, 2) update em leads (sincronizar etapa),
--- 3) insert em lead_stage_history, 4) insert em activities. Se a segunda
--- chamada falhasse, a primeira já tinha COMMITado — Deal fechado com Lead
--- na etapa errada, sem jeito de desfazer automaticamente (é exatamente o
--- que o updateLeadError handling da action tentava mitigar, avisando o
--- usuário para "ajustar manualmente").
---
--- Uma função Postgres roda como uma única transação: se qualquer instrução
--- no meio falhar (ex.: a trigger de integridade cross-tenant do
--- lead_stage_history rejeitar o changed_by), TUDO é desfeito, inclusive o
--- update em deals que já tinha "acontecido" antes na função.
---
--- SECURITY INVOKER (padrão, sem "security definer"): todas as instruções
--- dentro da função continuam sujeitas à RLS de quem chama — a mesma
--- organização/permissão que já protegia cada chamada isolada agora
--- protege a transação inteira. Isso também elimina uma classe de bug: não
--- existe mais um parâmetro leadId separado que pudesse divergir de
--- deal.lead_id (P0-05) — o lead é sempre lido a partir do próprio Deal.
--- ============================================================================
-
-create or replace function public.close_deal(
-  p_deal_id uuid,
-  p_status text
-) returns void
-language plpgsql
-as $$
-declare
-  v_deal record;
-  v_target_stage_id uuid;
-  v_lead_current_stage_id uuid;
-  v_actor uuid := auth.uid();
-begin
-  if p_status not in ('won', 'lost') then
-    raise exception 'Status inválido: use ''won'' ou ''lost''.';
-  end if;
-
-  -- RLS de deals_select já garante organização + deleted_at is null.
-  select id, organization_id, lead_id, pipeline_id, status, title, value
-    into v_deal
-  from public.deals
-  where id = p_deal_id
-  for update;
-
-  if v_deal.id is null then
-    raise exception 'Oportunidade não encontrada ou sem permissão de acesso.';
-  end if;
-  if v_deal.status <> 'open' then
-    raise exception 'Esta oportunidade já foi fechada anteriormente.';
-  end if;
-
-  if v_deal.pipeline_id is not null then
-    select id into v_target_stage_id
-    from public.pipeline_stages
-    where pipeline_id = v_deal.pipeline_id and kind = p_status::lead_stage_kind
-    limit 1;
-  end if;
-
-  update public.deals
-    set status = p_status::deal_status,
-        closed_at = now(),
-        stage_id = coalesce(v_target_stage_id, stage_id)
-    where id = p_deal_id;
-
-  if v_target_stage_id is not null then
-    select stage_id into v_lead_current_stage_id
-    from public.leads
-    where id = v_deal.lead_id
-    for update;
-
-    update public.leads
-      set stage_id = v_target_stage_id
-      where id = v_deal.lead_id;
-
-    if v_lead_current_stage_id is distinct from v_target_stage_id then
-      insert into public.lead_stage_history
-        (organization_id, lead_id, from_stage_id, to_stage_id, changed_by)
-      values
-        (v_deal.organization_id, v_deal.lead_id, v_lead_current_stage_id, v_target_stage_id, v_actor);
-    end if;
-  end if;
-
-  insert into public.activities (organization_id, lead_id, author_id, type, description)
-  values (
-    v_deal.organization_id,
-    v_deal.lead_id,
-    v_actor,
-    (case when p_status = 'won' then 'sale' else 'note' end)::activity_type,
-    case
-      when p_status = 'won' then
-        'Venda registrada' || case when v_deal.value is not null then ' — R$ ' || v_deal.value else '' end || '.'
-      else
-        'Oportunidade "' || v_deal.title || '" marcada como perdida.'
-    end
-  );
-end;
-$$;
-
-comment on function public.close_deal(uuid, text) is
-  'Item 3.3 da validação pós-auditoria: fecha um Deal (status, closed_at, '
-  'sincronização de etapa do Lead, histórico e activity) em uma única '
-  'transação. Substitui a lógica multi-etapas que antes vivia em '
-  'lib/deals/actions.ts::markDealStatusAction.';
-
-grant execute on function public.close_deal(uuid, text) to authenticated;
-
--- ============================================================================
--- Troca de senha obrigatória no primeiro login
---
--- Não existe fluxo de convite por e-mail neste produto (ver comentários em
--- lib/agency/actions.ts e lib/settings/actions.ts) — a senha temporária é
--- gerada com crypto.randomInt() e repassada manualmente pelo admin pra
--- pessoa nova. Sem forçar a troca, essa senha temporária pode continuar
--- sendo a senha real da conta indefinidamente.
---
--- default true: como TODA conta nova no produto nasce por um desses três
--- fluxos de senha temporária (convite de equipe, provisionamento de
--- cliente, criação de staff), não precisa tocar em nenhuma dessas actions
--- — a trigger que já cria o profiles a partir de auth.users (migration
--- 0003) puxa esse default automaticamente. Só falta o backfill abaixo pra
--- não forçar isso retroativamente em quem já está onboarded.
--- ============================================================================
-
-alter table public.profiles
-  add column if not exists must_change_password boolean not null default true;
-
-comment on column public.profiles.must_change_password is
-  'true força redirecionamento para /update-password no próximo login '
-  '(ver lib/auth/get-session.ts e os layouts de (dashboard)/(agency)). '
-  'Fica false depois que a pessoa define sua própria senha via '
-  'updatePasswordAction.';
-
--- Backfill: contas que já existiam antes desta migration já passaram por
--- onboarding — não forçar troca de senha retroativamente nelas.
-update public.profiles set must_change_password = false;
-
--- ============================================================================
--- Item adicional (pedido do usuário): forçar troca de senha no primeiro
--- acesso, para contas criadas com senha temporária pelo admin/agência.
---
--- A flag mora em profiles.must_change_password, NÃO em auth.users.user_metadata
--- — user_metadata pode ser editado pelo próprio usuário via
--- supabase.auth.updateUser({ data: {...} }) usando só a própria sessão, o
--- que deixaria a obrigatoriedade furável (o usuário simplesmente desligava
--- a flag sem trocar a senha de verdade). profiles é uma tabela normal:
--- REVOKE explícito impede qualquer UPDATE direto nessa coluna via
--- PostgREST, mesmo pelo próprio dono da linha — só dá pra desligá-la
--- através da função clear_must_change_password() abaixo, chamada de
--- dentro de updatePasswordAction DEPOIS que a senha já mudou de verdade.
--- ============================================================================
-
-alter table public.profiles add column if not exists must_change_password boolean not null default false;
-
-comment on column public.profiles.must_change_password is
-  'Força troca de senha no próximo login (setado ao criar conta com senha '
-  'temporária, em lib/settings/actions.ts e lib/agency/actions.ts). Só '
-  'pode virar false através de clear_must_change_password() — nunca por '
-  'UPDATE direto, nem pelo próprio dono da linha.';
-
-revoke update (must_change_password) on public.profiles from authenticated, anon;
-grant update (must_change_password) on public.profiles to service_role;
-
-create or replace function public.clear_must_change_password()
-returns void
-language sql
-security definer
-set search_path = public
-as $$
-  update public.profiles set must_change_password = false where id = auth.uid();
-$$;
-
-comment on function public.clear_must_change_password() is
-  'Único caminho para desligar must_change_password de si mesmo — chamada '
-  'por lib/auth/actions.ts::updatePasswordAction só depois que '
-  'supabase.auth.updateUser({password}) já confirmou a troca.';
-
-grant execute on function public.clear_must_change_password() to authenticated;

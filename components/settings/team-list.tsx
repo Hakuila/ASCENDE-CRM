@@ -11,10 +11,12 @@ function TeamMemberRow({
   member,
   currentUserId,
   isLastAdmin,
+  viewerIsAdmin,
 }: {
   member: TeamMember;
   currentUserId: string;
   isLastAdmin: boolean;
+  viewerIsAdmin: boolean;
 }) {
   const [isPending, startTransition] = useTransition();
   const isSelf = member.userId === currentUserId;
@@ -28,46 +30,65 @@ function TeamMemberRow({
         <p className="text-xs text-gray-500">{member.email}</p>
       </div>
 
-      <div className="flex items-center gap-3">
-        <Select
-          defaultValue={member.role}
-          disabled={isPending || isSelf || (member.role === "client_admin" && isLastAdmin)}
-          className="w-40"
-          onChange={(e) => {
-            const newRole = e.target.value as "client_admin" | "salesperson";
-            if (member.role === "client_admin" && newRole === "salesperson" && isLastAdmin) {
-              alert("Essa é a única pessoa administradora — promova outra antes de rebaixar.");
-              return;
-            }
-            startTransition(() => updateMemberRoleAction(member.membershipId, newRole));
-          }}
-        >
-          <option value="client_admin">Administrador</option>
-          <option value="salesperson">Vendedor</option>
-        </Select>
+      {/*
+        P1 (validação pós-auditoria): quem não é admin via os controles de
+        editar role / remover renderizados na tela mesmo sem permissão —
+        a action já bloqueava no servidor, mas a UI não escondia nada,
+        então clicar "não fazia efeito" sem explicar por quê. Pra quem não
+        é admin, mostra só o papel como texto.
+      */}
+      {viewerIsAdmin ? (
+        <div className="flex items-center gap-3">
+          <Select
+            defaultValue={member.role}
+            disabled={isPending || isSelf || (member.role === "client_admin" && isLastAdmin)}
+            className="w-40"
+            onChange={(e) => {
+              const newRole = e.target.value as "client_admin" | "salesperson";
+              if (member.role === "client_admin" && newRole === "salesperson" && isLastAdmin) {
+                alert("Essa é a única pessoa administradora — promova outra antes de rebaixar.");
+                return;
+              }
+              startTransition(() => updateMemberRoleAction(member.membershipId, newRole));
+            }}
+          >
+            <option value="client_admin">Administrador</option>
+            <option value="salesperson">Vendedor</option>
+          </Select>
 
-        <button
-          type="button"
-          disabled={isPending || isSelf || (member.role === "client_admin" && isLastAdmin)}
-          onClick={() => {
-            if (member.role === "client_admin" && isLastAdmin) {
-              alert("Essa é a única pessoa administradora — promova outra antes de remover.");
-              return;
-            }
-            if (confirm(`Remover ${member.name} da equipe?`)) {
-              startTransition(() => removeMemberAction(member.membershipId));
-            }
-          }}
-          className="text-sm font-medium text-red-600 hover:underline disabled:opacity-30"
-        >
-          Remover
-        </button>
-      </div>
+          <button
+            type="button"
+            disabled={isPending || isSelf || (member.role === "client_admin" && isLastAdmin)}
+            onClick={() => {
+              if (member.role === "client_admin" && isLastAdmin) {
+                alert("Essa é a única pessoa administradora — promova outra antes de remover.");
+                return;
+              }
+              if (confirm(`Remover ${member.name} da equipe?`)) {
+                startTransition(() => removeMemberAction(member.membershipId));
+              }
+            }}
+            className="text-sm font-medium text-red-600 hover:underline disabled:opacity-30"
+          >
+            Remover
+          </button>
+        </div>
+      ) : (
+        <span className="text-sm text-gray-500">{roleLabels[member.role]}</span>
+      )}
     </div>
   );
 }
 
-export function TeamList({ members, currentUserId }: { members: TeamMember[]; currentUserId: string }) {
+export function TeamList({
+  members,
+  currentUserId,
+  viewerIsAdmin,
+}: {
+  members: TeamMember[];
+  currentUserId: string;
+  viewerIsAdmin: boolean;
+}) {
   const adminCount = members.filter((m) => m.role === "client_admin").length;
 
   return (
@@ -78,6 +99,7 @@ export function TeamList({ members, currentUserId }: { members: TeamMember[]; cu
           member={member}
           currentUserId={currentUserId}
           isLastAdmin={adminCount <= 1}
+          viewerIsAdmin={viewerIsAdmin}
         />
       ))}
     </div>

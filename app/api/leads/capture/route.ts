@@ -66,7 +66,7 @@ export async function OPTIONS() {
 
 export async function POST(request: NextRequest) {
   // Camada 1: por IP, antes de tocar no banco para validar a api_key.
-  const ip = getClientIp(request);
+  const ip = getClientIp(request.headers);
   const ipLimit = await checkRateLimit(`leads-capture-ip:${ip}`, 60, 30);
   if (!ipLimit.allowed) {
     return NextResponse.json(

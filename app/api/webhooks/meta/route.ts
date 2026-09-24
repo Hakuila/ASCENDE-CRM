@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
   // P1-02: rate limit por IP como defesa extra além da assinatura HMAC —
   // se o App Secret algum dia vazar, isso ainda limita o dano de um flood.
   // Limite generoso porque o próprio Meta pode enviar rajadas legítimas.
-  const ip = getClientIp(request);
+  const ip = getClientIp(request.headers);
   const ipLimit = await checkRateLimit(`meta-webhook-ip:${ip}`, 60, 120);
   if (!ipLimit.allowed) {
     return new NextResponse("Too Many Requests", { status: 429, headers: { "Retry-After": "60" } });

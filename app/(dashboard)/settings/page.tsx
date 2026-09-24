@@ -46,7 +46,7 @@ export default async function SettingsPage() {
         <div className="mb-3 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-gray-700">Equipe</h2>
         </div>
-        <TeamList members={members} currentUserId={session.userId} />
+        <TeamList members={members} currentUserId={session.userId} viewerIsAdmin={admin} />
 
         {admin && (
           <div className="mt-4">
@@ -54,6 +54,18 @@ export default async function SettingsPage() {
           </div>
         )}
       </section>
+
+      {admin && (
+        <section className="mt-10">
+          <h2 className="mb-3 text-sm font-semibold text-gray-700">Auditoria</h2>
+          <p className="text-sm text-gray-500">
+            Histórico de alterações administrativas nesta organização.{" "}
+            <Link href="/settings/auditoria" className="font-medium text-brand hover:underline">
+              Ver logs de auditoria
+            </Link>
+          </p>
+        </section>
+      )}
 
       <section className="mt-10">
         <h2 className="mb-3 text-sm font-semibold text-gray-700">Sua conta</h2>

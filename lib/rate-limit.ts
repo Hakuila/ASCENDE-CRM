@@ -54,11 +54,22 @@ export async function checkRateLimit(
  * agrupa todas as requisições sem IP identificável num único balde de rate
  * limit; aceitável como fallback, não deve ser o caminho comum em produção).
  */
-export function getClientIp(request: Request): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
+/**
+ * Extrai o IP do cliente a partir dos headers padrão de proxy (Vercel,
+ * Cloudflare, etc.). Nenhum desses headers é garantido em todo ambiente de
+ * deploy — se nenhum estiver presente, cai em "unknown" (o que efetivamente
+ * agrupa todas as requisições sem IP identificável num único balde de rate
+ * limit; aceitável como fallback, não deve ser o caminho comum em produção).
+ *
+ * Aceita tanto `request.headers` (Route Handlers, é um Headers de verdade)
+ * quanto o retorno de `headers()` do next/headers (Server Actions, um
+ * ReadonlyHeaders) — os dois têm `.get()`, só isso é usado aqui.
+ */
+export function getClientIp(headers: { get(name: string): string | null }): string {
+  const forwardedFor = headers.get("x-forwarded-for");
   if (forwardedFor) return forwardedFor.split(",")[0].trim();
 
-  const realIp = request.headers.get("x-real-ip");
+  const realIp = headers.get("x-real-ip");
   if (realIp) return realIp;
 
   return "unknown";

@@ -18,7 +18,7 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const next = searchParams.get("next") ?? "/update-password";
 
-  const ip = getClientIp(request);
+  const ip = getClientIp(request.headers);
   const limit = await checkRateLimit(`auth-callback:${ip}`, 60, 20);
   if (!limit.allowed) {
     return NextResponse.redirect(`${origin}/login?error=muitas_tentativas`);

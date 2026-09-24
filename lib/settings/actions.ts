@@ -8,6 +8,7 @@ import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { canManageOrgUsers, isOrgAdmin } from "@/lib/permissions";
 import { organizationProfileSchema, inviteTeamMemberSchema } from "@/lib/validations/settings";
 import { logAuditEvent } from "@/lib/audit/log";
+import { forceMustChangePassword } from "@/lib/auth/force-password-change";
 
 export type SettingsFormState = { error?: string; success?: string } | null;
 export type InviteMemberState =
@@ -169,6 +170,9 @@ export async function inviteTeamMemberAction(
 
     return { error: `Não foi possível adicionar "${email}" à equipe. Tente novamente.` };
   }
+
+  // Conta criada com senha temporária: obrigatório trocar no primeiro acesso.
+  await forceMustChangePassword(admin, created.user.id);
 
   await logAuditEvent({
     organizationId: session.organization.id,

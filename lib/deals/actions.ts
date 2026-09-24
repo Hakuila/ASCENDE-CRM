@@ -4,7 +4,6 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/auth/get-session";
 import { dealSchema } from "@/lib/validations/deals";
-import { logLeadStageChange } from "@/lib/leads/history";
 
 export type DealFormState = { error?: string } | null;
 
@@ -111,13 +110,18 @@ export async function createDealAction(
 }
 
 /**
- * P0-02: agora preenche closed_at com o timestamp real do fechamento.
- * P0-04: ao fechar o Deal, move o Lead (e o próprio Deal) para a etapa do
- * pipeline com kind = 'won' | 'lost', mantendo Lead e Deal sincronizados.
- * P0-05: valida que o Deal pertence à organização da sessão e que
- * realmente está vinculado ao leadId informado antes de qualquer alteração.
- * P1-03: erros de update deixam de ser ignorados — a action agora retorna
- * DealFormState em vez de void.
+ * Item 3.3 da validação pós-auditoria: fechamento agora é uma única
+ * chamada à RPC close_deal (migration 0007), que faz tudo — update do
+ * Deal, sincronização de etapa do Lead, histórico e activity — dentro de
+ * UMA transação no banco. Antes, essas eram 4 chamadas separadas do
+ * client; se a 2ª ou 3ª falhasse, o Deal já tinha mudado de status sem
+ * jeito de desfazer automaticamente.
+ *
+ * `leadId` continua no parâmetro só para revalidatePath — não é mais usado
+ * em nenhuma query (o lead é sempre lido a partir do próprio Deal dentro
+ * da função), o que elimina de vez a possibilidade de um leadId
+ * divergente do deal.lead_id (P0-05): antes isso era checado em app,
+ * agora é estruturalmente impossível.
  */
 export async function markDealStatusAction(
   dealId: string,
@@ -128,98 +132,20 @@ export async function markDealStatusAction(
   if (!session?.organization) return { error: "Sessão inválida." };
 
   const supabase = createClient();
-  const organizationId = session.organization.id;
-
-  const { data: deal, error: dealError } = await supabase
-    .from("deals")
-    .select("title, value, status, lead_id, pipeline_id, organization_id")
-    .eq("id", dealId)
-    .maybeSingle();
-
-  if (dealError) return { error: "Não foi possível carregar a oportunidade." };
-  if (!deal || deal.organization_id !== organizationId || deal.lead_id !== leadId) {
-    return { error: "Oportunidade não encontrada." };
-  }
-  if (deal.status !== "open") {
-    return { error: "Esta oportunidade já foi fechada anteriormente." };
-  }
-
-  // P0-04: busca a etapa do pipeline correspondente a won/lost para
-  // sincronizar Lead e Deal com o estado comercial real.
-  let targetStageId: string | null = null;
-  if (deal.pipeline_id) {
-    const { data: targetStage, error: stageError } = await supabase
-      .from("pipeline_stages")
-      .select("id")
-      .eq("pipeline_id", deal.pipeline_id)
-      .eq("kind", status)
-      .maybeSingle();
-
-    if (stageError) {
-      return { error: "Não foi possível localizar a etapa de destino do pipeline." };
-    }
-    targetStageId = targetStage?.id ?? null;
-  }
-
-  const closedAt = new Date().toISOString();
-
-  const { error: updateDealError } = await supabase
-    .from("deals")
-    .update({
-      status,
-      closed_at: closedAt,
-      ...(targetStageId ? { stage_id: targetStageId } : {}),
-    })
-    .eq("id", dealId);
-
-  if (updateDealError) {
-    return { error: "Não foi possível atualizar a oportunidade." };
-  }
-
-  if (targetStageId) {
-    // P2-03: etapa do Lead ANTES da sincronização, para o "from" do histórico.
-    const { data: leadBefore } = await supabase
-      .from("leads")
-      .select("stage_id")
-      .eq("id", leadId)
-      .maybeSingle();
-
-    const { error: updateLeadError } = await supabase
-      .from("leads")
-      .update({ stage_id: targetStageId })
-      .eq("id", leadId);
-
-    if (updateLeadError) {
-      // O Deal já mudou de status; registramos o erro para correção manual
-      // em vez de deixar a falha passar despercebida (P1-03).
-      console.error("Falha ao sincronizar etapa do Lead após fechar Deal:", updateLeadError);
-      return {
-        error:
-          "A oportunidade foi fechada, mas não foi possível mover o Lead para a etapa correspondente. Ajuste manualmente.",
-      };
-    }
-
-    await logLeadStageChange(supabase, {
-      organizationId,
-      leadId,
-      fromStageId: leadBefore?.stage_id ?? null,
-      toStageId: targetStageId,
-      changedBy: session.userId,
-    });
-  }
-
-  const { error: activityError } = await supabase.from("activities").insert({
-    organization_id: organizationId,
-    lead_id: leadId,
-    author_id: session.userId,
-    type: status === "won" ? "sale" : "note",
-    description:
-      status === "won"
-        ? `Venda registrada${deal.value ? ` — R$ ${deal.value}` : ""}.`
-        : `Oportunidade "${deal.title}" marcada como perdida.`,
+  const { error } = await supabase.rpc("close_deal", {
+    p_deal_id: dealId,
+    p_status: status,
   });
-  if (activityError) {
-    console.error("Falha ao registrar activity de fechamento de Deal:", activityError);
+
+  if (error) {
+    if (error.message.includes("não encontrada")) {
+      return { error: "Oportunidade não encontrada." };
+    }
+    if (error.message.includes("já foi fechada")) {
+      return { error: "Esta oportunidade já foi fechada anteriormente." };
+    }
+    console.error("[markDealStatusAction] falha ao fechar oportunidade:", error.message);
+    return { error: "Não foi possível fechar a oportunidade. Tente novamente." };
   }
 
   revalidatePath(`/leads/${leadId}`);

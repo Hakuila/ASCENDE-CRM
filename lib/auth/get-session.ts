@@ -10,6 +10,8 @@ export type Session = {
   /** organização "ativa" — hoje o usuário pertence a no máximo uma (MVP) */
   organization: { id: string; name: string } | null;
   role: MembershipRole | null;
+  /** true = conta criada com senha temporária, ainda não trocada. */
+  mustChangePassword: boolean;
 };
 
 /**
@@ -40,7 +42,11 @@ export async function getSession(): Promise<Session | null> {
 
   const [{ data: profile }, { data: platformAdmin }, { data: memberships }] =
     await Promise.all([
-      supabase.from("profiles").select("name, email").eq("id", user.id).maybeSingle(),
+      supabase
+        .from("profiles")
+        .select("name, email, must_change_password")
+        .eq("id", user.id)
+        .maybeSingle(),
       supabase
         .from("platform_admins")
         .select("user_id")
@@ -72,5 +78,6 @@ export async function getSession(): Promise<Session | null> {
     isPlatformAdmin: Boolean(platformAdmin),
     organization: membership?.organization ?? null,
     role: (membership?.role as MembershipRole | undefined) ?? null,
+    mustChangePassword: profile?.must_change_password ?? false,
   };
 }

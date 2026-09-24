@@ -1,17 +1,19 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 /**
  * Middleware de autenticação.
  * - Renova a sessão Supabase a cada request (necessário com @supabase/ssr).
  * - Redireciona usuários não autenticados que tentam acessar rotas protegidas.
- * - P1-02: aplica rate limiting no submit de login e recuperação de senha,
- *   ANTES de qualquer trabalho de autenticação — protege contra força
- *   bruta de credenciais e spam de e-mails de recuperação. No App Router,
- *   o submit de um <form action={serverAction}> em /login chega aqui como
- *   um POST para o próprio pathname /login, então dá pra interceptar sem
- *   precisar tocar na Server Action em si.
+ *
+ * P1-02: o rate limiting de login/recuperação de senha NÃO fica mais aqui.
+ * Login e recuperação são Server Actions (useFormState) — interceptar o
+ * POST no middleware e devolver um NextResponse.json() quebra o protocolo
+ * de resposta que o useFormState espera de volta, fazendo o erro
+ * simplesmente não aparecer na tela a partir da tentativa limitada (sem
+ * throw, sem mensagem, silêncio total). O rate limit agora vive dentro de
+ * signInAction/forgotPasswordAction (lib/auth/actions.ts), que já retorna
+ * `{ error }` no formato certo.
  *
  * A resolução de organização/role acontece DEPOIS do login, dentro dos
  * layouts (dashboard)/layout.tsx e (agency)/layout.tsx, via lib/auth/get-session.ts.
@@ -20,24 +22,8 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
  */
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
-
   // Match EXATO (não startsWith) — evita capturar subpáginas por engano.
-  const authEntryRoutes = ["/login", "/forgot-password"];
-  const isAuthRoute = authEntryRoutes.includes(pathname);
-
-  if (request.method === "POST" && isAuthRoute) {
-    const ip = getClientIp(request);
-    // 10 tentativas / minuto por IP e por rota — generoso o suficiente
-    // para um usuário real errando a senha algumas vezes, apertado o
-    // bastante para inviabilizar força bruta de credenciais.
-    const limit = await checkRateLimit(`${pathname}:${ip}`, 60, 10);
-    if (!limit.allowed) {
-      return NextResponse.json(
-        { error: "Muitas tentativas. Aguarde um minuto e tente novamente." },
-        { status: 429, headers: { "Retry-After": "60" } }
-      );
-    }
-  }
+  const isAuthRoute = ["/login", "/forgot-password"].includes(pathname);
 
   let response = NextResponse.next({ request: { headers: request.headers } });
 
@@ -75,6 +61,25 @@ export async function middleware(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
+  }
+
+  // Força troca de senha para contas criadas com senha temporária (convite
+  // de equipe/cliente/staff). Checa em TODA request autenticada, não só
+  // nas protegidas — cobre o instante entre o login e o primeiro redirect
+  // pro dashboard. Roda antes do redirect de "já logado, sai do /login"
+  // abaixo, senão o usuário voltaria pro dashboard sem trocar a senha.
+  if (user && !isPasswordRecoveryRoute) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("must_change_password")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (profile?.must_change_password) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/update-password";
+      return NextResponse.redirect(url);
+    }
   }
 
   if (user && isAuthRoute && !isPasswordRecoveryRoute) {

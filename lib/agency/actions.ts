@@ -6,6 +6,7 @@ import { getSession } from "@/lib/auth/get-session";
 import { createServiceRoleClient } from "@/lib/supabase/admin";
 import { inviteClientSchema } from "@/lib/validations/agency";
 import { logAuditEvent } from "@/lib/audit/log";
+import { forceMustChangePassword } from "@/lib/auth/force-password-change";
 
 export type InviteClientState =
   | { error: string; success?: undefined }
@@ -126,6 +127,9 @@ export async function inviteClientAction(
     after: { orgName, adminName, adminEmail },
   });
 
+  // Conta criada com senha temporária: obrigatório trocar no primeiro acesso.
+  await forceMustChangePassword(admin, created.user.id);
+
   return { success: true, email: adminEmail, tempPassword };
 }
 
@@ -192,6 +196,9 @@ export async function createStaffAction(
     entityId: created.user.id,
     after: { name, email },
   });
+
+  // Conta criada com senha temporária: obrigatório trocar no primeiro acesso.
+  await forceMustChangePassword(admin, created.user.id);
 
   return { success: true, email, tempPassword };
 }

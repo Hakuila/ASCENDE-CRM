@@ -74,6 +74,7 @@ export type Database = {
           name: string;
           email: string;
           avatar_url: string | null;
+          must_change_password: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -82,6 +83,7 @@ export type Database = {
           name: string;
           email: string;
           avatar_url?: string | null;
+          must_change_password?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -90,6 +92,7 @@ export type Database = {
           name?: string;
           email?: string;
           avatar_url?: string | null;
+          must_change_password?: boolean;
           created_at?: string;
           updated_at?: string;
         };
@@ -926,13 +929,14 @@ export type Database = {
         Args: { org_id: string; uid: string };
         Returns: boolean;
       };
-      // Só pode ser chamada pelo próprio usuário autenticado que vai virar
-      // admin da nova organização (usa auth.uid() internamente).
+      // DESATIVADA (revogada de todos os roles na migration 0007) — fluxo
+      // de self-service signup não é mais usado neste produto.
       create_organization_with_admin: {
         Args: { org_name: string };
         Returns: string;
       };
-      // Service role apenas — revogada de authenticated/anon (migration 0004).
+      // Service role apenas — revogada de authenticated/anon (migration 0004),
+      // GRANT explícito para service_role adicionado na migration 0007.
       create_organization_for_user: {
         Args: { org_name: string; target_user_id: string };
         Returns: string;
@@ -974,6 +978,20 @@ export type Database = {
           p_before: Json | null;
           p_after: Json | null;
         };
+        Returns: undefined;
+      };
+      // Item 3.3 da validação pós-auditoria — fecha um Deal (status,
+      // closed_at, sincronização de etapa do Lead, histórico e activity)
+      // numa única transação. SECURITY INVOKER: sujeita à RLS de quem chama.
+      close_deal: {
+        Args: { p_deal_id: string; p_status: string };
+        Returns: undefined;
+      };
+      // Único caminho para desligar profiles.must_change_password de si
+      // mesmo (força troca de senha no primeiro acesso) — nunca por UPDATE
+      // direto, nem pelo próprio dono da linha.
+      clear_must_change_password: {
+        Args: Record<PropertyKey, never>;
         Returns: undefined;
       };
     };
